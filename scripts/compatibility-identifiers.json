@@ -279,6 +279,15 @@
       "path_tokens": [],
       "external_refs": []
     },
+    "desktop/scripts/link-real-common.mjs": {
+      "reason": "Receipt redaction retains the exact legacy pairing URL scheme and environment prefix accepted by existing clients.",
+      "tokens": [
+        "JARVIS_",
+        "jarvis"
+      ],
+      "path_tokens": [],
+      "external_refs": []
+    },
     "desktop/src/link-contract.cts": {
       "reason": "Exact OS URL scheme retained for installed clients and existing pairing links.",
       "tokens": [
@@ -545,7 +554,6 @@
         ".jarvis",
         "JARVIS_",
         "jarvis",
-        "jarvis-agent-sdk-runtime",
         "jarvis-context",
         "jarvis-dsh-runtime",
         "jarvis-paseo-runtime",
@@ -673,6 +681,7 @@
       "tokens": [
         ".jarvis",
         "JARVIS_",
+        "X-Jarvis-Op-Id",
         "com.jarvis.hub",
         "com.jarvis.link",
         "com.jarvis.node",
@@ -1008,7 +1017,6 @@
         "com.jarvis.node",
         "jarvis",
         "jarvis-",
-        "jarvis-agent-sdk-runtime",
         "jarvis-blob",
         "jarvis-check-",
         "jarvis-circuit",
@@ -1045,7 +1053,6 @@
         "X-Jarvis-Op-Id",
         "com.jarvis.node",
         "jarvis",
-        "jarvis-agent-sdk-runtime",
         "jarvis-context",
         "jarvis-dsh-runtime",
         "jarvis-file",
