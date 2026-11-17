@@ -859,6 +859,9 @@ Apps built with older Xcode do not extend under the status bar and camera on Duo
 - **Vertical side bars**: when the system places bars at the side (outer screen, inner landscape; non-nil `toolbarVerticalEdge`, iOS 27.1 onward), the Agents chat page no longer draws its own header buttons;
   Back, Terminal, Git, Files and ⋯ go into the system toolbar, arranged below the status bar (`ChatView.sideBarItems`, each with title and icon). The content top keeps only a non-collapsing title
   (tap for session info), same-space Agents, loop / background tasks and the sub-Agent status line (`sideHeader`, the same second and third rows as the custom header). Horizontal bars (ordinary iPhone, inner portrait) retain the custom collapsible header.
+  The pages that hold an Agents chat before it is there do the same (#9971, `DetailHeader`): a task still starting, one whose Agent did not start, a task,
+  an Agent or a side session that is gone put their ‹ (✕ in a sheet) and ⋯ in the system bar, so Back is at the top of the side column before and after
+  the Agent comes up, never at the top left first (HIG "Designing for iPhone Duo": the top of the vertical axis is for Back or Close).
   The chat hides the system back button (`navigationBarBackButtonHidden(sideBars)`), leaving only its supplied Back in the side column. Chat destinations must use
   `.splitDetailPage(ownsBack: true)`: an outer `navigationBarBackButtonHidden(false)` overrides the page's `true`, bringing back the system button
   and stacking two Back buttons (2026-11-04, TestFlight).

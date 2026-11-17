@@ -129,10 +129,13 @@ struct SideSessionPage: View {
                     if model.session(side) != nil {
                         page
                     } else {
+                        // Its own header with the way out (#9971): pushed (regular width), the page hid the bar and drew
+                        // none, so nothing led back to the parent.
+                        DetailHeader(title: String(localized: "Agent"), mark: EmptyView(), menu: EmptyView())
+                        Divider()
                         EmptyStateView(symbol: Theme.Icon.sideSessions, title: String(localized: "This agent is gone"),
                                        message: String(localized: "It may have been closed."))
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .toolbarVisibility(.hidden, for: .navigationBar)
                     }
                 }
                 .frame(width: geo.size.width, height: geo.size.height, alignment: .top) // the sheet's height, not the page's wish

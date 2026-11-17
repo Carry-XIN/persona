@@ -416,10 +416,6 @@ struct ChatView: View {
         } message: { c in
             Text(modeConfirmMessage(c))
         }
-        #if DEBUG
-        // `-sideBars YES`: lay the chat out as under iPhone Duo's side bars on any simulator (screenshots, tests).
-        .onAppear { if UserDefaults.standard.bool(forKey: "sideBars") { barsVertical = true } }
-        #endif
         #if os(macOS)
         .macChatDrop(key) // files dropped anywhere on the page go to the composer (#2113)
         #endif
@@ -2173,14 +2169,15 @@ struct ChatView: View {
     private var lastPromptID: String? { store.items.last { $0.role == "user" && $0.kind == .text }?.id }
 
     /// A swipe to the right goes from files or Git back to the chat. To the left there is none: on the chat a drag to
-    /// the left quotes a message (#1058); files are behind the header's folder button.
+    /// the left quotes a message (#1058); files are behind the header's folder button. On the chat it is off: there it
+    /// would do nothing, and the system's swipe back from anywhere on a pushed page is the page's (#9971).
     private var swipeablePanes: some View {
         #if os(visionOS)
         // A pinch-and-drag scrolls on visionOS; a sideways drag here would take it. The panes switch with their buttons.
         paneContent
         #else
         paneContent
-            .gesture(SwipeTo(direction: .right) { swipePane(forward: false) })
+            .gesture(SwipeTo(direction: .right, enabled: style == .dev && pane != .chat) { swipePane(forward: false) })
         #endif
     }
 
@@ -8523,8 +8520,10 @@ private extension View {
     }
 }
 
-private extension View {
+extension View {
     /// Whether the system presents this page's bars down the side of the screen (iPhone Duo); always false before iOS 27.1.
+    /// The Agents chat and the pages that host it before it is there (a task's page, a side session's) read the same, so
+    /// their Back is in the same place (#9971). DEBUG `-sideBars YES` says yes on any simulator (screenshots, tests).
     func readsVerticalBars(_ vertical: Binding<Bool>) -> some View { modifier(VerticalBarsReader(vertical: vertical)) }
 }
 
@@ -8532,14 +8531,19 @@ private struct VerticalBarsReader: ViewModifier {
     @Binding var vertical: Bool
 
     func body(content: Content) -> some View {
-        #if compiler(>=6.4) && os(iOS) // `toolbarVerticalEdge` is in the iOS 27.1 SDK; Xcode 26 (Swift ≤ 6.3) has no such key path
-        if #available(iOS 27.1, *) {
-            content.modifier(VerticalBarsEdgeReader(vertical: $vertical))
-        } else {
+        Group {
+            #if compiler(>=6.4) && os(iOS) // `toolbarVerticalEdge` is in the iOS 27.1 SDK; Xcode 26 (Swift ≤ 6.3) has no such key path
+            if #available(iOS 27.1, *) {
+                content.modifier(VerticalBarsEdgeReader(vertical: $vertical))
+            } else {
+                content
+            }
+            #else
             content
+            #endif
         }
-        #else
-        content
+        #if DEBUG
+        .onAppear { if UserDefaults.standard.bool(forKey: "sideBars") { vertical = true } }
         #endif
     }
 }
