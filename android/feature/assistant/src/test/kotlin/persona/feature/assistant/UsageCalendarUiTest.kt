@@ -26,6 +26,7 @@ import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.text.TextLayoutResult
+import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import kotlinx.coroutines.CompletableDeferred
@@ -49,6 +50,7 @@ import persona.core.designsystem.AppStyleStore
 import persona.core.designsystem.LayoutDensity
 import persona.core.designsystem.PersonaTheme
 import java.io.IOException
+import java.time.DayOfWeek
 import java.time.LocalDate
 
 @RunWith(AndroidJUnit4::class)
@@ -152,6 +154,30 @@ class UsageCalendarUiTest {
         rule.onAllNodesWithTag("assistant-usage-calendar").assertCountEquals(0)
     }
 
+    @Test fun anEmptyRefreshKeepsTheVisibleHomeCalendar() {
+        val answers = ArrayDeque(listOf(days, days.copy(days = emptyList())))
+        val hub = object : Hub(days, hours) {
+            override suspend fun usageDays(days: Int): UsageDays {
+                dayReads++
+                return answers.removeFirst()
+            }
+        }
+        rule.setContent {
+            PersonaTheme(reduceMotion = true) {
+                UsageHomeSection(hub, listOf(Machine("office", name = "Office", online = true)), true, onOpen = {})
+            }
+        }
+        rule.onNodeWithTag("assistant-usage-calendar").assertExists()
+
+        rule.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
+        rule.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
+        rule.waitForIdle()
+
+        assertEquals(2, hub.dayReads)
+        rule.onNodeWithTag("assistant-usage-calendar").assertExists()
+        rule.onAllNodesWithText("Online devices").assertCountEquals(0)
+    }
+
     @Test fun detailsShowHoursComputersAndAllFourKinds() {
         val hub = Hub(days, hours)
         rule.setContent { PersonaTheme(reduceMotion = true) { UsageCalendarPage(hub, onBack = {}) } }
@@ -233,6 +259,18 @@ class UsageCalendarUiTest {
         rule.onNodeWithText("Last 7 days by hour", substring = true).assertExists()
     }
 
+    @Test fun malformedDayAndHourDatesAreIgnoredInsteadOfCrashingDetails() {
+        val invalidDays = days.copy(days = days.days + days.days.first().copy(date = ""))
+        val invalidHours = hours.copy(hours = hours.hours + hours.hours.single().copy(t = 1_760_000_100, date = "not-a-date"))
+        rule.setContent {
+            PersonaTheme(reduceMotion = true) { UsageCalendarPage(Hub(invalidDays, invalidHours), onBack = {}) }
+        }
+
+        rule.onNodeWithText("Last 7 days by hour", substring = true).assertExists()
+        rule.onNodeWithTag("usage-day-2026-11-17").assertExists()
+        rule.onNodeWithTag("usage-day-").assertDoesNotExist()
+    }
+
     @Test fun compactDeviceChipsUseTheSpaceTokenOnlyOnce() {
         AppStyleStore(ApplicationProvider.getApplicationContext()).setDensity(LayoutDensity.Compact)
         rule.setContent {
@@ -289,22 +327,61 @@ class UsageCalendarUiTest {
         }
     }
 
-    @Test
-    @Config(sdk = [35], qualifiers = "ja-w400dp-h900dp-xhdpi")
-    fun japaneseWeekdaysStayWholeInsideTheirColumn() {
+    @Test fun weekdayLabelsShareTheDayCellRowCenters() {
         rule.setContent { PersonaTheme(reduceMotion = true) { UsageCalendarCard(longDays, onOpen = null) } }
         rule.waitForIdle()
-        val column = rule.onNodeWithTag("usage-calendar-weekdays").getBoundsInRoot()
 
-        for (day in listOf("MONDAY", "WEDNESDAY", "FRIDAY")) {
-            val tag = "usage-weekday-$day"
-            val text = rule.onNodeWithTag(tag, useUnmergedTree = true)
-            val bounds = text.getUnclippedBoundsInRoot()
-            assertTrue("$day starts outside its weekday column", bounds.left >= column.left)
-            assertTrue("$day ends outside its weekday column", bounds.right <= column.right)
-            val layout = textLayoutTag(tag)
-            assertEquals("$day stays on one line", 1, layout.lineCount)
-            assertFalse("$day is ellipsized", layout.isLineEllipsized(0))
+        for ((day, date) in listOf(
+            DayOfWeek.MONDAY to "2026-11-16",
+            DayOfWeek.WEDNESDAY to "2026-11-11",
+            DayOfWeek.FRIDAY to "2026-11-13",
+        )) {
+            val label = rule.onNodeWithTag("usage-weekday-${day.name}", useUnmergedTree = true).getUnclippedBoundsInRoot()
+            val cell = rule.onNodeWithTag("usage-day-$date").getBoundsInRoot()
+            val labelCenter = (label.top + label.bottom).value / 2
+            val cellCenter = (cell.top + cell.bottom).value / 2
+            assertEquals("$day must be centered on its actual day-cell row", cellCenter, labelCenter, 0.01f)
+        }
+    }
+
+    @Test
+    @Config(sdk = [35], qualifiers = "ja-w400dp-h900dp-xhdpi")
+    fun japaneseWeekdaysStayWholeInsideTheirColumnAtDefaultAndLargeText() {
+        var fontScale by mutableStateOf(1f)
+        rule.setContent {
+            val base = LocalConfiguration.current
+            val configuration = Configuration(base).apply { this.fontScale = fontScale }
+            PersonaTheme(reduceMotion = true) {
+                CompositionLocalProvider(
+                    LocalConfiguration provides configuration,
+                    LocalDensity provides Density(LocalDensity.current.density, fontScale),
+                ) { UsageCalendarCard(longDays, onOpen = null) }
+            }
+        }
+
+        for (scale in listOf(1f, 2f)) {
+            rule.runOnIdle { fontScale = scale }
+            rule.waitForIdle()
+            val column = rule.onNodeWithTag("usage-calendar-weekdays").getBoundsInRoot()
+            for (day in listOf("MONDAY", "WEDNESDAY", "FRIDAY")) {
+                val tag = "usage-weekday-$day"
+                val text = rule.onNodeWithTag(tag, useUnmergedTree = true)
+                val bounds = text.getUnclippedBoundsInRoot()
+                assertTrue("$scale $day starts outside its weekday column", bounds.left >= column.left)
+                assertTrue("$scale $day ends outside its weekday column", bounds.right <= column.right)
+                val layout = textLayoutTag(tag)
+                assertEquals("$scale $day stays on one line", 1, layout.lineCount)
+                assertFalse("$scale $day is ellipsized", layout.isLineEllipsized(0))
+                assertTrue(
+                    "$scale $day line width ${layout.getLineRight(0)} exceeds layout width ${layout.size.width}",
+                    layout.getLineRight(0) <= layout.size.width + 0.01f,
+                )
+                val lastGlyph = layout.getBoundingBox(layout.layoutInput.text.length - 1)
+                assertTrue(
+                    "$scale $day last glyph $lastGlyph exceeds layout width ${layout.size.width}",
+                    lastGlyph.left >= 0f && lastGlyph.right <= layout.size.width + 0.01f,
+                )
+            }
         }
     }
 

@@ -39,8 +39,11 @@ internal class UsageCalendarModel(private val api: UsageHistoryApi) {
                 daysRead.await() to hoursRead.await()
             } else api.usageDays() to mutable.value.hours
             currentCoroutineContext().ensureActive()
+            val validDays = days.validDates()
+            val validHours = hours?.validDates()
             if (read == revision) mutable.update {
-                it.copy(days = days, hours = hours, loading = false, failure = false)
+                val retainedDays = if (validDays.days.isEmpty() && it.days?.days?.isNotEmpty() == true) it.days else validDays
+                it.copy(days = retainedDays, hours = validHours, loading = false, failure = false)
             }
         } catch (cancelled: CancellationException) {
             throw cancelled

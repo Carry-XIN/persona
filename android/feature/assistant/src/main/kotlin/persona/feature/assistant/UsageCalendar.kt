@@ -39,7 +39,6 @@ import persona.core.designsystem.icons.PersonaIcons
 import persona.core.navigation.Navigator
 import java.time.DayOfWeek
 import java.time.Instant
-import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.TextStyle
 
@@ -64,8 +63,9 @@ internal fun UsageCalendarCard(
     modifier: Modifier = Modifier,
     showLegend: Boolean = false,
 ) {
+    val validDays = remember(days) { days.validDates() }
     var selectedDate by rememberSaveable(days.zone) { mutableStateOf<String?>(null) }
-    val byDate = remember(days) { days.days.associateBy { it.date } }
+    val byDate = remember(validDays) { validDays.days.associateBy { it.date } }
     LaunchedEffect(byDate.keys) { if (selectedDate !in byDate.keys) selectedDate = null }
     val selected = selectedDate?.let(byDate::get)
     val zone = remember(days.zone) { usageZone(days.zone) }
@@ -75,16 +75,16 @@ internal fun UsageCalendarCard(
                 .clickable(onClickLabel = stringResource(R.string.assistant_usage_open), role = Role.Button, onClick = onOpen)),
             verticalArrangement = Arrangement.spacedBy(Tokens.Space.s),
         ) {
-            UsageDaySummary(days, selected, zone)
-            UsageDayGrid(days, selectedDate, zone) { date -> selectedDate = if (selectedDate == date) null else date }
+            UsageDaySummary(validDays, selected, zone)
+            UsageDayGrid(validDays, selectedDate, zone) { date -> selectedDate = if (selectedDate == date) null else date }
             if (showLegend) UsageLegend()
             if (selected != null) {
-                val index = days.days.indexOf(selected)
+                val index = validDays.days.indexOf(selected)
                 Row(horizontalArrangement = Arrangement.spacedBy(Tokens.Space.xs)) {
                     JIconButton(PersonaIcons.back, stringResource(R.string.assistant_usage_previous_day),
-                        enabled = index > 0, onClick = { selectedDate = days.days[index - 1].date })
+                        enabled = index > 0, onClick = { selectedDate = validDays.days[index - 1].date })
                     JIconButton(PersonaIcons.forward, stringResource(R.string.assistant_usage_next_day),
-                        enabled = index < days.days.lastIndex, onClick = { selectedDate = days.days[index + 1].date })
+                        enabled = index < validDays.days.lastIndex, onClick = { selectedDate = validDays.days[index + 1].date })
                 }
             }
         }
@@ -142,9 +142,12 @@ private fun UsageDayGrid(days: UsageDays, selectedDate: String?, zone: ZoneId, o
     val monthHeight = UsageCalendarTokens.monthHeight * labelScale
     val monthWidth = UsageCalendarTokens.monthWidth * labelScale
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Tokens.Space.s)) {
-        Column(Modifier.width(weekdayWidth).padding(top = monthHeight).testTag("usage-calendar-weekdays")) {
+        Column(
+            Modifier.width(weekdayWidth).padding(top = monthHeight).testTag("usage-calendar-weekdays"),
+            verticalArrangement = Arrangement.spacedBy(UsageCalendarTokens.gap),
+        ) {
             for (day in DayOfWeek.entries) {
-                Box(Modifier.height(UsageCalendarTokens.cell).padding(bottom = UsageCalendarTokens.gap), contentAlignment = Alignment.Center) {
+                Box(Modifier.size(UsageCalendarTokens.cell), contentAlignment = Alignment.Center) {
                     if (day in listOf(DayOfWeek.MONDAY, DayOfWeek.WEDNESDAY, DayOfWeek.FRIDAY)) {
                         Text(day.getDisplayName(TextStyle.SHORT, currentLocale), Modifier.requiredHeight(weekdayLabelHeight).testTag("usage-weekday-${day.name}"),
                             style = PersonaTheme.type.micro,
@@ -362,9 +365,10 @@ internal fun UsageCalendarPage(api: UsageHistoryApi?, onBack: () -> Unit, listSt
 @Composable
 private fun UsageHourlyGrid(history: UsageHours) {
     val zone = remember(history.zone) { usageZone(history.zone) }
-    val rows = remember(history) { history.hours.groupBy { it.date }.entries.toList() }
-    val steps = remember(history) {
-        history.hours.map { it.t }.zip(usageHeatSteps(history.hours.map { it.total })).toMap()
+    val validHistory = remember(history) { history.validDates() }
+    val rows = remember(validHistory) { validHistory.hours.groupBy { it.date }.entries.toList() }
+    val steps = remember(validHistory) {
+        validHistory.hours.map { it.t }.zip(usageHeatSteps(validHistory.hours.map { it.total })).toMap()
     }
     val dateWidth = UsageCalendarTokens.hourDateWidth * LocalDensity.current.fontScale.coerceIn(1f, 2f)
     Column(Modifier.horizontalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(UsageCalendarTokens.hourlyGap)) {
@@ -394,10 +398,14 @@ private fun usageZone(raw: String): ZoneId = raw.takeIf { it.isNotBlank() }
 private fun compactTokens(value: Long, locale: java.util.Locale): String = ChartMath.compact(value.toDouble(), locale)
 
 @Composable
-private fun formatDay(date: String, zone: ZoneId, full: Boolean = true): String =
-    LocalizedFormats.format(LocalDate.parse(date).atStartOfDay(zone).toInstant(),
+private fun formatDay(date: String, zone: ZoneId, full: Boolean = true): String {
+    val parsed = parseUsageDate(date) ?: return ""
+    return LocalizedFormats.format(parsed.atStartOfDay(zone).toInstant(),
         if (full) LocalizedFormats.DATE else LocalizedFormats.MONTH_DAY, currentLocale, zone)
+}
 
 @Composable
-private fun formatMonth(date: String, zone: ZoneId): String =
-    LocalizedFormats.format(LocalDate.parse(date).atStartOfDay(zone).toInstant(), "MMM", currentLocale, zone)
+private fun formatMonth(date: String, zone: ZoneId): String {
+    val parsed = parseUsageDate(date) ?: return ""
+    return LocalizedFormats.format(parsed.atStartOfDay(zone).toInstant(), "MMM", currentLocale, zone)
+}

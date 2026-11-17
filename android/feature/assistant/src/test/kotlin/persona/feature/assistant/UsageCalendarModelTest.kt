@@ -69,6 +69,22 @@ class UsageCalendarModelTest {
         assertEquals(3, hub.dayReads)
     }
 
+    @Test fun anEmptyRefreshKeepsTheLastNonemptyAnswerButAnInitialEmptyAnswerStaysEmpty() = runTest {
+        val hub = Hub(days, hours)
+        val model = UsageCalendarModel(hub)
+        model.loadDays()
+
+        hub.days = days.copy(days = emptyList())
+        model.loadDays()
+        assertSame(days, model.state.value.days)
+        assertFalse(model.state.value.failure)
+
+        val empty = days.copy(days = emptyList())
+        val initial = UsageCalendarModel(Hub(empty, hours))
+        initial.loadDays()
+        assertSame(empty, initial.state.value.days)
+    }
+
     @Test fun theDetailsReadIncludesTheHourlyBreakdown() = runTest {
         val hub = Hub(days, hours)
         val model = UsageCalendarModel(hub)
