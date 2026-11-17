@@ -120,9 +120,10 @@ try {
     check(`1440 ${theme}: a drag pans`, afterPan && before && (afterPan[0] !== before[0] || afterPan[1] !== before[1]), { before, afterPan });
     // a redraw that changes only states (the mock advances one step on each draw): the view's own page change — the
     // pushed node's page and back — is the app's own redraw, with the same key, so the person's fold, pan and zoom
-    // survive it (the canvas's store keeps them). Press whichever node is in reach now.
+    // survive it (the canvas's store keeps them). Press whichever node is inside the stage now.
     const panM = await measure(p);
-    const inView = panM.nodes.find((n) => n.box.x > 0 && n.box.y > 60 && n.box.x + n.box.w < 1440 && n.box.y + n.box.h < 880);
+    const inView = panM.nodes.find((n) =>
+      n.box.x >= m.stage.x && n.box.y >= m.stage.y && n.box.x + n.box.w <= m.stage.x + m.stage.w && n.box.y + n.box.h <= m.stage.y + m.stage.h);
     const pressed = inView
       ? (await p.locator(`[data-graph-node="${inView.id}"]`).click({ timeout: 10_000 }).then(() => true, () => false))
       : false;
@@ -160,10 +161,30 @@ try {
     const p = await page({ width: 390, height: 844, theme });
     const m = await measure(p);
     check(`390 ${theme}: the canvas between 320 and 900 tall`, m.stage.h >= 320 && m.stage.h <= 900, m.stage);
-    // a node is whole and inside the stage
-    const root = m.nodes.find((n) => n.id === "root");
-    check(`390 ${theme}: the root node inside the canvas`, root && root.box.w > 100 && root.box.h > 30, root && root.box);
+    // a node is whole, and the selected node (p2.s3) is inside the stage
+    const sel = m.nodes.find((n) => n.id === "p2.s3");
+    check(
+      `390 ${theme}: the selected node's centre inside the canvas`,
+      sel && sel.box.x < m.stage.x + m.stage.w && sel.box.x + sel.box.w > m.stage.x && sel.box.y < m.stage.y + m.stage.h && sel.box.y + sel.box.h > m.stage.y,
+      { sel: sel && sel.box, stage: m.stage },
+    );
+    // the fold control counters the zoom: at the opening scale (about 0.5) it is still at least 24 px on screen
+    const foldBox = await p.locator('[data-graph-fold]').first().boundingBox();
+    check(`390 ${theme}: the fold control at least 24 px on screen at any zoom`, foldBox && foldBox.width >= 24 && foldBox.height >= 24, foldBox);
     await p.screenshot({ path: join(shots, `work-390-${theme}.png`) });
+    // the keyboard: Tab reaches the stage's own nodes, arrows pan, + zooms, 0 fits (the stage, not a node, focused)
+    await p.locator("[data-graph-stage]").focus();
+    const beforeKeys = transform(await measure(p));
+    await p.keyboard.press("ArrowRight");
+    await p.keyboard.press("ArrowDown");
+    const afterArrows = transform(await measure(p));
+    check(`390 ${theme}: the arrows pan`, beforeKeys && afterArrows && (afterArrows[0] !== beforeKeys[0] || afterArrows[1] !== beforeKeys[1]), { beforeKeys, afterArrows });
+    await p.keyboard.press("+");
+    const afterPlus = transform(await measure(p));
+    check(`390 ${theme}: + zooms in`, afterPlus && afterArrows && afterPlus[2] > afterArrows[2], { afterArrows, afterPlus });
+    await p.keyboard.press("0");
+    const afterZero = transform(await measure(p));
+    check(`390 ${theme}: 0 fits`, afterZero && afterPlus && afterZero[2] < afterPlus[2], { afterPlus, afterZero });
     await p.context().close();
   }
   // the overview card's compact preview: 200 tall, still, opens Full screen
@@ -174,13 +195,42 @@ try {
     if (card) {
       const h = await p.locator(".graph-preview").first().evaluate((e) => e.getBoundingClientRect().height);
       check("compact: the preview 200 tall", Math.abs(h - 200) < 4, h);
+      // the preview fits the whole layer: its scaled box sits inside the .graph-preview box
+      const inside = await p.locator(".graph-preview").first().evaluate((e) => {
+        const layer = e.querySelector("[data-graph-layer]");
+        if (!layer) return null;
+        const b = e.getBoundingClientRect();
+        const l = layer.getBoundingClientRect();
+        return { preview: { x: b.x, y: b.y, w: b.width, h: b.height }, layer: { x: l.x, y: l.y, w: l.width, h: l.height } };
+      });
+      check(
+        "compact: the fitted layer inside the preview box",
+        inside && inside.layer.x >= inside.preview.x - 1 && inside.layer.y >= inside.preview.y - 1 &&
+          inside.layer.x + inside.layer.w <= inside.preview.x + inside.preview.w + 1 &&
+          inside.layer.y + inside.layer.h <= inside.preview.y + inside.preview.h + 1,
+        inside,
+      );
       // no node presses and no zoom buttons in the preview
       const buttons = await p.locator(".graph-preview button[aria-label]").count();
       check("compact: no buttons in the preview", buttons === 0, buttons);
       await p.locator(".graph-preview").first().click();
       const overlay = await p.waitForSelector('[role="dialog"]', { timeout: 10_000 }).then(() => true, () => false);
       check("compact: pressing the preview opens Full screen", overlay);
-      await p.keyboard.press("Escape");
+      if (overlay) {
+        // Full screen from the card is the same interactive canvas: node buttons, fold controls, a drag that pans
+        const nodes = await p.locator('[role="dialog"] [data-graph-node]').count();
+        const folds = await p.locator('[role="dialog"] [data-graph-fold]').count();
+        check("compact: Full screen has node buttons and fold controls", nodes > 0 && folds > 0, { nodes, folds });
+        const beforeDrag = transform(await measure(p));
+        await p.mouse.move(700, 450);
+        await p.mouse.down();
+        await p.mouse.move(600, 400, { steps: 4 });
+        await p.mouse.up();
+        const afterDrag = transform(await measure(p));
+        check("compact: a drag pans Full screen", afterDrag && beforeDrag && (afterDrag[0] !== beforeDrag[0] || afterDrag[1] !== beforeDrag[1]), { beforeDrag, afterDrag });
+        await p.screenshot({ path: join(shots, "card-1440-light-full.png") });
+        await p.keyboard.press("Escape");
+      }
     }
     await p.screenshot({ path: join(shots, "card-1440-light.png") });
     await p.context().close();

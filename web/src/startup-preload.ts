@@ -386,9 +386,12 @@ export async function brotliCopies(dir: string, files: string[]): Promise<{ file
 // #9727: UI version 10's graph — the reading of a view's graph (lib/extension-ui.ts readGraph and the UIGraph fields)
 // and its one-line lazy entry and Suspense case in views/extensions/ViewBody.tsx, both in the first screen's static
 // closure; the canvas itself is a chunk of its own (ViewBody10.tsx). 488 B in every language, measured in one
-// environment against main 8cba97a33 (ja 482,373 B to 482,861 B; en 479,275 B to 479,763 B; zh-Hans 480,079 B to
+// environment against main 8cba97a33 (ja 482,373 B to 482,861 B; en 479,275 B to 479,763 B, zh-Hans 480,079 B to
 // 480,567 B). Main had 153 B of room; the budget rises by exactly that delta.
-export const FIRST_SCREEN_BUDGET = 483_014;
+// And 235 B of #9727's fix round: the graph's owner scoping (lib/extension-owner.ts, set by ExtensionSlots.tsx — both
+// in the first screen's static closure) and the Suspense fallback that keeps a card's height while its chunk loads
+// (en 479,763 to 479,998 B; ja 482,861 to 483,096 B; zh-Hans 480,567 to 480,802 B, measured in one environment).
+export const FIRST_SCREEN_BUDGET = 483_014 + 235;
 // The hash in a built file's name: the 8 characters of Rollup's [hash] (url-safe base64) between "-" and the
 // extension, as vite.config.ts names every chunk and asset ("assets/[name]-[hash].js", "[name]-[hash][extname]").
 const NAME_HASH = /-([A-Za-z0-9_-]{8})\.[^./]+$/;
@@ -619,7 +622,9 @@ export function firstScreenOverBudget(bytes: [string, number][], budget = FIRST_
 // that has a graph. Main had 0 B of room; the budget rises by exactly that delta.
 // 2 B more of the same change's drift (the canvas's chunk name the idle tier embeds, measured 46,115 B after the
 // gesture fix), so the budget covers what the branch sends.
-export const IDLE_TIER_BUDGET = 46_115;
+// 28 B more of #9727's fix round (the graph's Suspense fallback keeps a card's own height — the wrapper — while the
+// canvas's chunk loads, and the scope prop in its lazy registration; measured 46,143 B in one environment).
+export const IDLE_TIER_BUDGET = 46_143;
 
 const gzip = promisify(gzipCompress);
 

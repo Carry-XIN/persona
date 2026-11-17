@@ -2792,13 +2792,17 @@ Below versions 6 and 3 the rows then lose what those versions did not have (`ico
 client (whose components never include `graph`) gets the same rows. Extensions may still draw an older app differently (`ui_version`).
 
 **The web** (#9727) draws all of it and sends `10` (`web/src/views/extensions/ViewBody10.tsx`, a chunk loaded with the first view that has
-a graph; the page keeps the canvas's height meanwhile). The nodes are cards of the node token's size on a layer one transform pans and zooms, the edges thin curves in
-one SVG behind them, a group a quiet frame with its title, the selected node ringed. The canvas is 70% of the page's visible height (320–900 px) and opens fitted, held to
-50%–100%, centred on `selected`; pan by dragging or the wheel, zoom by pinching, Ctrl/Cmd + wheel or buttons (25%–200%), Fit down to 25%; Full screen draws the same canvas
-over the window. A fold is its own round control beside the node, never over it; the person's folds, pan and zoom are kept per `key` across redraws (re-fitting while untouched),
-the view's `folded` applying until they fold one themselves. The keyboard walks the nodes in reading order (arrows pan, +/- zoom, 0 fits) and a focused node is panned into
-view. A card draws the same graph as a still fitted preview 200 px tall with no buttons or presses; pressing it opens Full screen. The web's native stream still sends 7.
-`web/e2e/extension-graph.mjs` checks it in a browser against the mock (`MOCK_EXTENSIONS=1 MOCK_EXTENSION_GRAPH=1`).
+a graph; the page keeps the canvas's height meanwhile, and the card's fallback keeps the card's height too). The nodes are cards of the node token's size — growing with the
+page's text-size choice as every font does — on a layer one transform pans and zooms, the edges thin curves in one SVG behind them, a group a quiet frame with its title, the
+selected node ringed. A node with an action is a button; one without is a focusable group whose whole label reads out. The canvas is 70% of the page's visible height
+(320–900 px) and opens fitted, held to 50%–100%, centred on `selected`, else with the first root at the top start; pan by dragging or the wheel, zoom by pinching, Ctrl/Cmd +
+wheel or buttons (25%–200%), Fit down to 25%; Full screen draws the same canvas over the window (Back closes it on every width). A fold is its own round control beside the
+node, never over it — inside the node's own list item, so Tab walks a node then its fold — and it counters the zoom so it never shrinks below its own 24 px on screen (a
+44 px hit); the person's folds, pan and zoom are kept per `key` and per owner (the extension) across redraws (re-fitting while untouched), the view's `folded` applying until
+they fold one themselves. The keyboard walks the nodes in reading order (arrows pan, +/- zoom, 0 fits) and a focused node is panned into view; nodes fade in only when they
+are new or their fields changed. A card draws the same graph as a still fitted preview 200 px tall — fitted with no zoom floor, so a big graph fits too — with no buttons or
+presses; pressing it opens Full screen, the same interactive canvas as the page's. The web's native stream still sends 7.
+`web/e2e/extension-graph.mjs` checks it in a browser against the mock (`MOCK_EXTENSIONS=1 MOCK_EXTENSION_GRAPH=1`), keyboard included.
 
 **iOS** (#9727): see `apple/Persona/Views/Settings/ExtensionGraph.swift`.
 
