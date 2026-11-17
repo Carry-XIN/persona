@@ -154,6 +154,10 @@ type assistantProc struct {
 	// retire: a message that needs every tool went into this round's process while it worked; it is let go once it
 	// settled (assistant_round.go roundSettled). settleArmed: that look is on its way (settleSoon).
 	retire, settleArmed bool
+	// awaited: a message that needs every tool waits for this round's process to end its turn (assistant_round.go
+	// awaitRoundTurn); a Stop meanwhile ends the process at once and lets that message go in once it exited
+	// (assistantInterrupt), and awaitStopped says so to the wait.
+	awaited, awaitStopped bool
 	// lastOut: when it last printed a line, as nanoseconds since born on the monotonic clock (readAssistant, printed):
 	// it has settled once it printed nothing for assistantSettle, not working (assistant_round.go quiet). reading: the
 	// line reader is on a line now, so the lines behind it are not read yet (readAssistant).
@@ -564,6 +568,11 @@ func (n *Node) assistantSend(ctx context.Context, id, cwd, launcher, text string
 	// that goes in as before. A process a round started has fewer tools and is never idle-compacted, so once it settled
 	// it is replaced by a plain --resume with every tool, compacted when idle as any other process (assistant_round.go).
 	otherTools := p != nil && p.toolSet != round.toolSet
+	if otherTools && p.round && superviseRoundFrom(ctx) == nil && recovery == nil {
+		// A message that needs every tool, for a round's process at work: it waits for the turn to end (bounded), so it
+		// goes into a plain resume with every tool below rather than into the round's process (assistant_round.go).
+		n.awaitRoundTurn(ctx, p)
+	}
 	if p != nil && (!p.alive() || p.launcher != launcher || p.fingerprint != n.executionFingerprint(launcher, execution) || p.needsRestartFor(want) || p.instructionsStale() || otherTools) {
 		p.mu.Lock()
 		active := p.busy || len(p.tasks) > 0
@@ -588,10 +597,11 @@ func (n *Node) assistantSend(ctx context.Context, id, cwd, launcher, text string
 				return "", refusal("busy", i18n.T(i18n.From(ctx), "rpc-errors.assistant_supervision_busy"), nil)
 			}
 			if otherTools && superviseRoundFrom(ctx) == nil && recovery == nil {
-				// A message that needs every tool, for a round's process at work: it goes in as Claude Code queues it and
-				// runs once on the round's tools, and the process is let go once it settled (assistant_round.go
-				// roundSettled), so the next message starts with every tool. A round kept as busy and a recovery's retry
-				// of the round's turn are the round's own.
+				// A message that needs every tool, for a round's process still at work after awaitRoundTurn (past its
+				// bound, only background tasks running, or a turn Claude Code began after the wait looked): it goes in as
+				// Claude Code queues it and runs once on the round's tools, and the process is let go once it settled
+				// (assistant_round.go roundSettled), so the next message starts with every tool. A round kept as busy and a
+				// recovery's retry of the round's turn are the round's own.
 				p.mu.Lock()
 				p.retire = true
 				p.mu.Unlock()

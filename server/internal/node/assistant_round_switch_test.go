@@ -498,20 +498,28 @@ func sendWhileItSettles(t *testing.T, n *Node, p *assistantProc, params map[stri
 // process begins to work goes in as before the same way.
 func TestAMessageThatJoinsARoundProcessRetiresIt(t *testing.T) {
 	for _, c := range []struct {
-		name string
-		send func(t *testing.T, n *Node, round *assistantProc) (words string, retires bool) // has a message join the working process
+		name   string
+		send   func(t *testing.T, n *Node, round *assistantProc) (words string, retires bool) // has a message join the working process
+		waited string                                                                         // how its wait for the round's turn is logged ("" none)
 	}{
-		{"the owner's, while the round answers", func(t *testing.T, n *Node, round *assistantProc) (string, bool) {
+		{"the owner's, while the round answers past the wait", func(t *testing.T, n *Node, round *assistantProc) (string, bool) {
+			wait := roundTurnWait
+			roundTurnWait = 300 * time.Millisecond
+			t.Cleanup(func() { roundTurnWait = wait })
+			start := time.Now()
 			ownerSends(t, n, "the owner's question")
+			if waited := time.Since(start); waited < roundTurnWait {
+				t.Fatalf("joined the round's process after %s, before the wait's bound", waited)
+			}
 			return "the owner's question", true
-		}},
+		}, "for a supervision round's turn: bound"},
 		{"the switch's, as Claude Code starts a turn of its own", func(t *testing.T, n *Node, round *assistantProc) (string, bool) {
 			feedAssistant(n, round, turnResult) // the round's turn ended: idle, not settled yet
 			if out := sendWhileItSettles(t, n, round, relay("once-joined")); out["context"] != nil {
 				t.Fatalf("the relay's answer: %v", out)
 			}
 			return "once-joined", true
-		}},
+		}, ""},
 		{"a round, as Claude Code starts a turn of its own", func(t *testing.T, n *Node, round *assistantProc) (string, bool) {
 			feedAssistant(n, round, turnResult)
 			if out := sendWhileItSettles(t, n, round, map[string]any{"session_id": roundConversation, "text": "📋 督办 once-gap",
@@ -519,7 +527,7 @@ func TestAMessageThatJoinsARoundProcessRetiresIt(t *testing.T) {
 				t.Fatalf("the round's answer: %v", out)
 			}
 			return "once-gap", false
-		}},
+		}, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			n, argv, input := roundTestNode(t, roundStarted("2.1.322", 1), false)
@@ -530,6 +538,10 @@ func TestAMessageThatJoinsARoundProcessRetiresIt(t *testing.T) {
 			}
 			round := roundProc(n)
 			words, retires := c.send(t, n, round)
+			if logged := strings.Count(logs.String(), "for a supervision round's turn"); c.waited == "" && logged != 0 ||
+				c.waited != "" && (logged != 1 || !strings.Contains(logs.String(), c.waited)) {
+				t.Fatalf("the wait for the round's turn, want %q logged:\n%s", c.waited, logs.String())
+			}
 			waitFor(t, "the message in the round's process", func() bool {
 				return strings.Contains(strings.Join(roundInputs(t, input), "\n"), words)
 			})

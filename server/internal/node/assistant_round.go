@@ -30,11 +30,16 @@ import (
 // assistantSettle) when a message needing every tool comes is replaced by a plain --resume with every tool and no round
 // state, so it is compacted when idle again (stopSettled; a fresh round stops the process the same way). Replacing one
 // still working (a turn, one Claude Code started, background tasks, a compaction, a message it queued or has not
-// reported on yet) would lose that work, so there is no second queue at the node: a round's process reports itself working until it settled
-// (assistantSessions), the manager keeps its supervision messages in its persisted relay queue meanwhile, and a message
-// that comes anyway (the owner's, or one sent as the process began to work) goes into it as Claude Code queues it and
-// runs once on the round's tools. The process is then marked to retire and is let go once it settled (roundSettled),
-// so the next message starts a process with every tool.
+// reported on yet) would lose that work, so there is no second queue at the node: a round's process reports itself
+// working until it settled (assistantSessions), and the manager keeps its supervision messages in its persisted relay
+// queue meanwhile. A message that needs every tool and comes anyway (the owner's, a relay racing the row) while the
+// process runs a turn waits for that turn, up to roundTurnWait (30 s), inside its send and holding the conversation's
+// locks, then goes into a plain resume with every tool (awaitRoundTurn); a Stop meanwhile ends the round at once and the
+// message goes in once that process exited (stopAwaited). Past the wait, with only background tasks running, or as Claude Code begins a turn of
+// its own after the wait looked, the message goes into the working process as Claude Code queues it (the owner's
+// preempting a background round, as assistant/owner_preempt.go says) and runs once on the round's tools; the process is
+// then marked to retire and is let go once it settled (roundSettled), so the next message starts a process with every
+// tool.
 //
 // --resume-session-at is a print-mode flag Claude Code does not document. It is used only where it was measured: Claude
 // Code (not Codex, an agent runtime or a guest), roundMinClaude or later, an idle
@@ -328,6 +333,121 @@ func (n *Node) roundSettled(p *assistantProc) {
 		unlock()
 	}
 	n.notifySessionsSoon()
+}
+
+// roundTurnWait bounds how long a message that needs every tool waits for a round's process to end its turn
+// (awaitRoundTurn) before it joins that process on the round's tools, as it did without the wait. The node's RPC carries
+// no deadline: the hub waits 90 s for an app's message to a working row (hub/send.go sendWait) and the manager's drain
+// 90 s (assistant/conversations.go drainRelays); after the wait come the settle second and the start (assistantStartWait),
+// and a message sent right behind this one waits for all of it on the typing lock. A variable so tests can shorten it.
+var roundTurnWait = 30 * time.Second
+
+// roundTurnPoll is how often awaitRoundTurn looks again.
+const roundTurnPoll = 50 * time.Millisecond
+
+// roundStopExitWait bounds how long a message waits for a round's process a Stop ended while it waited (stopAwaited)
+// to exit: stop() kills it 5 s on, and a margin. One still there by then outlived its kill, and the wait ends anyway
+// rather than hold the conversation's locks for good.
+const roundStopExitWait = 10 * time.Second
+
+// awaitRoundTurn: a message that needs every tool came for p, a round's process: wait while p runs a turn (busy, a
+// compaction, a message Claude Code holds), up to roundTurnWait, so the message goes into a plain resume with every tool
+// once p settled (assistantSend, stopSettled) rather than into p on the round's tools. The caller holds the
+// conversation's typing and assistantLife locks: messages sent after it wait behind it, in their order, and nothing
+// starts a turn in p meanwhile. Not for background tasks alone (they may run for hours), nor once an earlier message
+// went into p (retire): this one joins it behind that one. A recovery of p's turn that begins meanwhile is cancelled,
+// as the message would have cancelled it had it come a moment later (assistantSend); a Stop ends p at once
+// (assistantInterrupt), and the message goes in once p exited. A wait says in one log line how it ended and how long it
+// took.
+func (n *Node) awaitRoundTurn(ctx context.Context, p *assistantProc) {
+	start := time.Now()
+	deadline := start.Add(roundTurnWait)
+	p.mu.Lock()
+	if p.retire {
+		p.mu.Unlock()
+		return
+	}
+	p.awaited = true
+	p.mu.Unlock()
+	waited, outcome := false, ""
+	var stopExit time.Time // set once a Stop ended p: until when the wait goes on for p to exit
+	defer func() {
+		p.mu.Lock()
+		p.awaited, p.awaitStopped = false, false
+		p.mu.Unlock()
+		if waited {
+			n.logf("assistant %s: a message that needs every tool waited %s for a supervision round's turn: %s", short(p.id),
+				time.Since(start).Round(time.Millisecond), outcome)
+		}
+	}()
+	tick := time.NewTicker(roundTurnPoll)
+	defer tick.Stop()
+	for {
+		n.mu.Lock()
+		current, recovering := n.procs[p.id] == p, n.recoveries[p.id] != nil
+		n.mu.Unlock()
+		if recovering {
+			n.cancelAssistantRecovery(p.id)
+		}
+		// The look and the end of the wait are one step under p's lock, as stopAwaited takes it: a Stop either finds the
+		// message waiting and ends p, or finds it gone on and takes the usual way.
+		p.mu.Lock()
+		if p.awaitStopped && stopExit.IsZero() {
+			stopExit = time.Now().Add(roundStopExitWait)
+		}
+		switch {
+		case !p.alive():
+			outcome = "exited"
+		case p.awaitStopped && time.Now().Before(stopExit):
+			// stopAwaited stopped it: wait until it exited, past the bound and whatever it prints on its way out
+			// (its turn's result), so the message never goes into a process that is going away (its input closed, a
+			// message written there is lost).
+		case !current:
+			outcome = "replaced"
+		case !(p.busy || p.compacting || p.manual || slices.ContainsFunc(p.written, p.holdsLocked)):
+			outcome = "turn_ended"
+		case !time.Now().Before(deadline):
+			outcome = "bound"
+		}
+		if outcome != "" {
+			if p.awaitStopped { // stopAwaited ended it, whatever the process did on its way out
+				outcome = "stopped"
+			}
+			p.awaited, p.awaitStopped = false, false
+		}
+		p.mu.Unlock()
+		if outcome != "" {
+			return
+		}
+		waited = true
+		select {
+		case <-tick.C:
+		case <-p.exited:
+		case <-ctx.Done():
+			outcome = "ctx"
+			return
+		}
+	}
+}
+
+// stopAwaited is a Stop for conversation id while a message waits for its round's process to end its turn
+// (awaitRoundTurn): that process stops now, under its lock so the wait cannot end in between, and the message goes into
+// a plain resume with every tool. True when it did; false leaves the Stop to go on as ever.
+func (n *Node) stopAwaited(id string) bool {
+	n.mu.Lock()
+	p := n.procs[id]
+	n.mu.Unlock()
+	if p == nil {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.awaited {
+		return false
+	}
+	p.awaitStopped = true
+	p.stop()
+	return true
 }
 
 // roundTranscript is what roundAnchor read in a transcript: the anchor ("" for none), the Claude Code version that wrote
