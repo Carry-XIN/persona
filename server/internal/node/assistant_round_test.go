@@ -9,8 +9,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/nwverse/persona/server/internal/proto"
 )
 
 // The background supervisor's rounds (#7315, assistant_round.go). The transcripts below are reduced to what Claude Code
@@ -395,24 +393,21 @@ func TestAssistantSendSuperviseRoundStartFailureRetriesPlain(t *testing.T) {
 	}
 }
 
-// Only Claude Code on the CLI takes a round: Codex, the Agent SDK runtime, another runtime and a guest conversation keep
-// their context, with no anchor read.
-func TestSuperviseRoundOnCodexSDKOrRuntimeKeepsContext(t *testing.T) {
+// Only Claude Code takes a round: Codex and a guest conversation keep their context, with no anchor read. (Agent
+// runtimes never get here: assistantSend refuses supervision on one before it looks at a round.)
+func TestSuperviseRoundOnCodexOrGuestKeepsContext(t *testing.T) {
 	n := codexTestNode(t)
 	for _, c := range []struct {
-		name      string
-		agent     string
-		guest     bool
-		execution modelExecution
+		name  string
+		agent string
+		guest bool
 	}{
-		{"codex", "codex", false, modelExecution{}},
-		{"the agent SDK", "claude", false, modelExecution{Runtime: proto.AssistantRuntimeAgentSDK}},
-		{"another runtime", "claude", false, modelExecution{Runtime: "pi"}},
-		{"a guest", "claude", true, modelExecution{}},
+		{"codex", "codex", false},
+		{"a guest", "claude", true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			_, r := withSuperviseRound(context.Background())
-			if got := n.superviseRound(context.Background(), r, roundConversation, nil, c.agent, c.guest, c.execution); got.anchor != "" {
+			if got := n.superviseRound(context.Background(), r, roundConversation, nil, c.agent, c.guest); got.anchor != "" {
 				t.Fatalf("a round: %+v", got)
 			}
 			if out := r.answer(map[string]any{}); out["context"] != roundKept || out["why"] != roundWhyUnsupported {
@@ -420,11 +415,14 @@ func TestSuperviseRoundOnCodexSDKOrRuntimeKeepsContext(t *testing.T) {
 			}
 		})
 	}
-	// A process of another agent's, or on a runtime, the same.
+	// A live process of another agent's, the same.
 	_, r := withSuperviseRound(context.Background())
-	p := &assistantProc{agent: "claude", runtime: proto.AssistantRuntimeAgentSDK, exited: make(chan struct{})}
-	if got := n.superviseRound(context.Background(), r, roundConversation, p, "claude", false, modelExecution{}); got.anchor != "" {
-		t.Fatalf("a round on a runtime's process: %+v", got)
+	p := &assistantProc{agent: "codex", exited: make(chan struct{})}
+	if got := n.superviseRound(context.Background(), r, roundConversation, p, "claude", false); got.anchor != "" {
+		t.Fatalf("a round on another agent's process: %+v", got)
+	}
+	if out := r.answer(map[string]any{}); out["context"] != roundKept || out["why"] != roundWhyUnsupported {
+		t.Fatalf("answer %v", out)
 	}
 	// No round asked for: nothing on the answer, and nothing to set.
 	var none *roundResult
@@ -459,7 +457,7 @@ func TestSuperviseRoundOldClaudeKeepsContext(t *testing.T) {
 				p.mu.Unlock()
 			}
 			_, r := withSuperviseRound(context.Background())
-			got := n.superviseRound(context.Background(), r, roundConversation, p, "claude", false, modelExecution{})
+			got := n.superviseRound(context.Background(), r, roundConversation, p, "claude", false)
 			out := r.answer(map[string]any{})
 			if c.want == "" {
 				if got.anchor != "a0" || got.toolSet != roundToolSet || out["context"] != roundFresh {

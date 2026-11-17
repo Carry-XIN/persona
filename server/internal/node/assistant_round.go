@@ -37,7 +37,7 @@ import (
 // so the next message starts a process with every tool.
 //
 // --resume-session-at is a print-mode flag Claude Code does not document. It is used only where it was measured: Claude
-// Code on the CLI (not Codex, the Agent SDK runtime, another runtime or a guest), roundMinClaude or later, an idle
+// Code (not Codex, an agent runtime or a guest), roundMinClaude or later, an idle
 // process with no background tasks, and an anchor found on the transcript's latest chain (roundAnchor). Anything else
 // sends as before and says why in the answer (context "kept"); a round whose process does not start is sent once more
 // as before. A round's process has started when it prints its init (readAssistant): one that refuses the anchor prints
@@ -144,22 +144,21 @@ func (r *roundResult) answer(out map[string]any) map[string]any {
 
 // superviseRound decides how the round r for conversation id goes in: from its first turn (a spawnRound with the anchor,
 // after which the caller stops p, if any, once it settled, and starts anew) or as before (the zero spawnRound, r says why). p is the
-// conversation's process (nil for none), agent the launcher's kind, guest whether it is a guest conversation and
-// execution what it runs on.
-func (n *Node) superviseRound(ctx context.Context, r *roundResult, id string, p *assistantProc, agent string, guest bool, execution modelExecution) spawnRound {
+// conversation's process (nil for none), agent the launcher's kind and guest whether it is a guest conversation.
+func (n *Node) superviseRound(ctx context.Context, r *roundResult, id string, p *assistantProc, agent string, guest bool) spawnRound {
 	kept := func(why string) spawnRound {
 		r.set(roundKept, why)
 		n.logf("assistant %s: supervision round goes in as before (%s)", short(id), why)
 		return spawnRound{}
 	}
-	if id == "" || agent != "claude" || guest || execution.Runtime != "" {
+	if id == "" || agent != "claude" || guest {
 		return kept(roundWhyUnsupported)
 	}
 	version := ""
 	if p != nil && p.alive() {
 		p.mu.Lock()
 		busy := p.workingLocked()
-		other := p.agent != "claude" || p.runtime != ""
+		other := p.agent != "claude"
 		version = p.claudeVersion
 		p.mu.Unlock()
 		if other {

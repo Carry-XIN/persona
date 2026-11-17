@@ -536,7 +536,7 @@ func (n *Node) assistantSend(ctx context.Context, id, cwd, launcher, text string
 	var round spawnRound
 	joins := false // the round goes in as before because the process works: it joins that process (below)
 	if r := superviseRoundFrom(ctx); r != nil {
-		round = n.superviseRound(ctx, r, id, p, agent, guest != nil, execution)
+		round = n.superviseRound(ctx, r, id, p, agent, guest != nil)
 		if round.anchor != "" && p != nil && !n.stopSettled(ctx, p) {
 			r.set(roundKept, roundWhyBusy)
 			n.logf("assistant %s: supervision round goes in as before (%s)", short(id), roundWhyBusy)

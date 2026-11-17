@@ -278,8 +278,8 @@ func (n *Node) spawnClaude(id, cwd, launcher string, resume, spare bool, options
 }
 
 func (n *Node) spawnClaudeWith(id, cwd, launcher string, resume, spare bool, round spawnRound, options ...modelExecution) (*assistantProc, error) {
-	if round.anchor != "" && (!resume || spare || n.guestOf(id) != nil || executionOption(options).Runtime != "") {
-		return nil, errors.New("a supervision round resumes a Claude conversation on the CLI")
+	if round.anchor != "" && (!resume || spare || n.guestOf(id) != nil) {
+		return nil, errors.New("a supervision round resumes a Claude conversation")
 	}
 	execution := executionOption(options)
 	if err := execution.check("claude"); err != nil {
