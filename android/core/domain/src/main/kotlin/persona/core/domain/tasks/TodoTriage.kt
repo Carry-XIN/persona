@@ -252,7 +252,7 @@ fun Todo.checksAsOpen(t: Triage?): Boolean =
 /** An accepted task its hub reopened with more work, with nothing of it running or asking: it reads Accepted, not Follow up.
  * An open concern still waits for its report, so neither Accepted nor its done styling applies (#3582). */
 fun Todo.acceptedAtRest(lookup: (SessionKey) -> Session?, now: Long = System.currentTimeMillis()): Boolean =
-    kind != "concern" && !isDone && !waitsForOwner() && acceptanceStands && triageStatus(lookup, now).let {
+    kind != "concern" && !isDone && (!waitsForOwner() || decisionDismissed()) && acceptanceStands && triageStatus(lookup, now).let {
         it == TriageStatus.FollowUp || it == TriageStatus.Unread || it == TriageStatus.NotStarted || it == TriageStatus.UsageLimit
     }
 

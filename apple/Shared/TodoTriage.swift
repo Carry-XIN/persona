@@ -213,7 +213,7 @@ nonisolated enum TodoTriageLogic {
     ///  1. failedStart    the task's agent never started                    → Waiting on you, Done after 48 h;
     ///     superseded     … and a related to-do (its row) really finished   → Done immediately (#3713)
     ///  2. agentAsks      an agent asks (question, approval) or was cut off → Waiting on you
-    ///  3. ownerDecides   review says needs_user, or a decision / "cannot" ask → Waiting on you
+    ///  3. ownerDecides   review says needs_user, or an undismissed decision / "cannot" ask → Waiting on you
     ///  4. agentRunning   an agent is working or starting                   → Working
     ///  5. closed         done_at set                                       → Just finished for a fresh unseen report, Done otherwise
     ///  6. accepted       the latest review accepted it (even reopened)     → Done immediately
@@ -248,7 +248,7 @@ nonisolated enum TodoTriageLogic {
             return concern ? at(.other, .rest) : at(.done, .failedStart)
         }
         if status == .needsYou || status == .interrupted { return at(.waiting, .agentAsks) }
-        if todo.doneAt == nil, review == .needsUser || ask?.outcome == "decide" || ask?.outcome == "cannot" {
+        if todo.doneAt == nil, todo.decisionReview?.dismissed != true, review == .needsUser || ask?.outcome == "decide" || ask?.outcome == "cannot" {
             return at(.waiting, .ownerDecides)
         }
         if status == .working || status == .waiting { return at(.working, .agentRunning) }

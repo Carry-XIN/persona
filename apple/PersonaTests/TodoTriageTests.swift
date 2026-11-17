@@ -724,7 +724,9 @@ extension TodoTriageTests {
          "ask":{"outcome":"\(outcome)","verdict":"Choose the rollout","asked_at":"2026-11-10T10:00:00.000Z"}}
         """
         let td = try sharedTodo(json)
+        let t = try sharedAt(json)
         let status: TaskState = .followup
+        #expect(t.section == .waiting && t.rule == .ownerDecides)
         #expect(td.acceptanceStands)
         #expect(td.waitsForOwner)
         #expect(!td.acceptedAtRest(status))
@@ -743,7 +745,9 @@ extension TodoTriageTests {
          "ask":{"outcome":"\(outcome)","verdict":"Choose the rollout","asked_at":"2026-11-10T10:00:00.000Z"}}
         """
         let td = try sharedTodo(json)
+        let t = try sharedAt(json)
         let status: TaskState = .followup
+        #expect(t.section == .done && t.rule == .accepted)
         #expect(td.decisionReview?.dismissed == true)
         #expect(td.waitsForOwner)
         #expect(td.acceptedAtRest(status))

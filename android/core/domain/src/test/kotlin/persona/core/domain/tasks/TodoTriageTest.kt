@@ -6,6 +6,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import persona.core.contracts.DecisionReview
 import persona.core.contracts.ReviewCheck
 import persona.core.contracts.Session
 import persona.core.contracts.SessionKey
@@ -489,6 +490,28 @@ class TodoTriageTest {
             assertFalse("accepted must not hide an owner decision ($outcome)", waiting.acceptedAtRest(lookup, now))
             assertEquals(TodoState.NeedsYou, waiting.shownState(lookup, now))
         }
+    }
+
+    @Test
+    fun aDismissedOwnerDecisionRestoresAcceptedAtRest() {
+        val accepted = todo("t", agents = listOf(agent("idle")), reopenedAt = hoursAgo(4), supervision = acceptedReopened())
+        val waiting = listOf("decide", "cannot").map { outcome ->
+            accepted.copy(ask = TodoAsk(outcome = outcome, verdict = "needs_user", askedAt = hoursAgo(1)))
+        }
+        val dismissed = waiting.map {
+            it.copy(decisionReview = DecisionReview(
+                reviewAt = accepted.supervision!!.latestReview!!.at, dismissalId = "dismiss-current-round",
+            ))
+        }
+        assertEquals(listOf(true, true), dismissed.map { it.waitsForOwner() })
+        assertEquals(listOf(true, true), dismissed.map { it.decisionDismissed() })
+        assertEquals(listOf(TriageRule.Accepted, TriageRule.Accepted), dismissed.map { at(it).rule })
+        assertEquals("dismissed decide/cannot restore accepted at rest", listOf(true, true),
+            dismissed.map { it.acceptedAtRest(lookup, now) })
+        assertEquals(listOf(TodoState.Done, TodoState.Done), dismissed.map { it.shownState(lookup, now) })
+        assertEquals("genuinely open decide/cannot still suppress accepted", listOf(false, false),
+            waiting.map { it.acceptedAtRest(lookup, now) })
+        assertEquals(listOf(TodoState.NeedsYou, TodoState.NeedsYou), waiting.map { it.shownState(lookup, now) })
     }
 
     @Test
