@@ -9,15 +9,13 @@ import (
 	"syscall"
 	"testing"
 	"time"
-
-	"github.com/nwverse/persona/server/internal/proto"
 )
 
 // Two starts share one launcher profile. Hold the first start's source read
 // open until the second has a chance to run: it must not start before the seed
 // is complete, and a failed seed must remain retryable.
 func TestAssistantProfileSeedSerializesConcurrentStarts(t *testing.T) {
-	f := sdkProfileTest(t)
+	f := cliProfileTest(t)
 	n := f.n
 	n.home = os.Getenv("HOME")
 	source := filepath.Join(n.home, ".claude")
@@ -58,7 +56,7 @@ func TestAssistantProfileSeedSerializesConcurrentStarts(t *testing.T) {
 		err error
 	}
 	start := func(id string, ch chan<- answer) {
-		p, err := n.spawnClaude(id, t.TempDir(), "claude", false, false, sdkExec(proto.AssistantRuntimeAgentSDK))
+		p, err := n.spawnClaude(id, t.TempDir(), "claude", false, false, cliExec())
 		ch <- answer{p: p, err: err}
 	}
 	profile := filepath.Join(n.dir, "profiles", "claude")

@@ -6,12 +6,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/nwverse/persona/server/internal/proto"
 )
 
 func TestAssistantProfileUsesValidSourceAfterReadFailure(t *testing.T) {
-	f := sdkProfileTest(t)
+	f := cliProfileTest(t)
 	n := f.n
 	n.home = os.Getenv("HOME")
 	source := filepath.Join(n.home, ".claude")
@@ -48,7 +46,7 @@ func TestAssistantProfileUsesValidSourceAfterReadFailure(t *testing.T) {
 }
 
 func TestAssistantProfileIgnoresUnrelatedSourceReadFailure(t *testing.T) {
-	f := sdkProfileTest(t)
+	f := cliProfileTest(t)
 	n := f.n
 	n.home = os.Getenv("HOME")
 	source := filepath.Join(n.home, ".claude")
@@ -67,7 +65,7 @@ func TestAssistantProfileIgnoresUnrelatedSourceReadFailure(t *testing.T) {
 	}
 	n.claudeStartDir.Store(&unrelated)
 	const id = "a5500000-0000-4000-8000-000000000590"
-	p, err := n.spawnClaude(id, t.TempDir(), "claude", false, false, sdkExec(proto.AssistantRuntimeAgentSDK))
+	p, err := n.spawnClaude(id, t.TempDir(), "claude", false, false, cliExec())
 	if err != nil {
 		t.Fatalf("an unrelated broken source without any opt-in blocked a new profile: %v", err)
 	}
@@ -81,7 +79,7 @@ func TestAssistantProfileIgnoresUnrelatedSourceReadFailure(t *testing.T) {
 }
 
 func TestAssistantProfileRetriesSourceReadFailure(t *testing.T) {
-	f := sdkProfileTest(t)
+	f := cliProfileTest(t)
 	n := f.n
 	n.home = os.Getenv("HOME")
 	source := filepath.Join(n.home, ".claude")
@@ -94,7 +92,7 @@ func TestAssistantProfileRetriesSourceReadFailure(t *testing.T) {
 	}
 	profile := filepath.Join(n.dir, "profiles", "claude")
 	const id = "a5500000-0000-4000-8000-000000000564"
-	if _, err := n.spawnClaude(id, t.TempDir(), "claude", false, false, sdkExec(proto.AssistantRuntimeAgentSDK)); err == nil {
+	if _, err := n.spawnClaude(id, t.TempDir(), "claude", false, false, cliExec()); err == nil {
 		t.Fatal("an unreadable source policy did not abort the first start")
 	}
 	if _, err := os.Stat(profile); !os.IsNotExist(err) {
@@ -104,7 +102,7 @@ func TestAssistantProfileRetriesSourceReadFailure(t *testing.T) {
 	if err := os.WriteFile(path, settings, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	p, err := n.spawnClaude(id, t.TempDir(), "claude", false, false, sdkExec(proto.AssistantRuntimeAgentSDK))
+	p, err := n.spawnClaude(id, t.TempDir(), "claude", false, false, cliExec())
 	if err != nil {
 		t.Fatalf("second start did not retry after the source became readable: %v", err)
 	}

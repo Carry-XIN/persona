@@ -4,12 +4,10 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/nwverse/persona/server/internal/proto"
 )
 
 func TestAssistantExistingProfileKeepsSettings(t *testing.T) {
-	f := sdkProfileTest(t)
+	f := cliProfileTest(t)
 	n := f.n
 	n.home = os.Getenv("HOME")
 	source := filepath.Join(n.home, ".claude")
@@ -29,7 +27,7 @@ func TestAssistantExistingProfileKeepsSettings(t *testing.T) {
 	if err := os.WriteFile(path, original, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	p, err := n.spawnClaude("a5500000-0000-4000-8000-000000000559", t.TempDir(), "claude", false, false, sdkExec(proto.AssistantRuntimeAgentSDK))
+	p, err := n.spawnClaude("a5500000-0000-4000-8000-000000000559", t.TempDir(), "claude", false, false, cliExec())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,10 +42,10 @@ func TestAssistantExistingProfileKeepsSettings(t *testing.T) {
 }
 
 func TestAssistantNewProfileWithoutSourceCreatesNoSettings(t *testing.T) {
-	f := sdkProfileTest(t)
+	f := cliProfileTest(t)
 	n := f.n
 	n.home = os.Getenv("HOME")
-	p, err := n.spawnClaude("a5500000-0000-4000-8000-000000000560", t.TempDir(), "claude", false, false, sdkExec(proto.AssistantRuntimeAgentSDK))
+	p, err := n.spawnClaude("a5500000-0000-4000-8000-000000000560", t.TempDir(), "claude", false, false, cliExec())
 	if err != nil {
 		t.Fatal(err)
 	}

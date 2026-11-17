@@ -5,12 +5,10 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/nwverse/persona/server/internal/proto"
 )
 
 func TestAssistantEmptyProfileRetriesFailedSeed(t *testing.T) {
-	f := sdkProfileTest(t)
+	f := cliProfileTest(t)
 	n := f.n
 	n.home = os.Getenv("HOME")
 	source := filepath.Join(n.home, ".claude")
@@ -32,7 +30,7 @@ func TestAssistantEmptyProfileRetriesFailedSeed(t *testing.T) {
 	}
 	profile := filepath.Join(n.dir, "profiles", "claude")
 	const id = "a5500000-0000-4000-8000-000000000563"
-	if _, err := n.spawnClaude(id, t.TempDir(), "claude", false, false, sdkExec(proto.AssistantRuntimeAgentSDK)); err == nil {
+	if _, err := n.spawnClaude(id, t.TempDir(), "claude", false, false, cliExec()); err == nil {
 		t.Fatal("seed write failure did not abort the first start")
 	}
 	if _, err := os.Stat(profile); !os.IsNotExist(err) {
@@ -40,7 +38,7 @@ func TestAssistantEmptyProfileRetriesFailedSeed(t *testing.T) {
 	}
 
 	fail = false
-	p, err := n.spawnClaude(id, t.TempDir(), "claude", false, false, sdkExec(proto.AssistantRuntimeAgentSDK))
+	p, err := n.spawnClaude(id, t.TempDir(), "claude", false, false, cliExec())
 	if err != nil {
 		t.Fatalf("second start did not retry the seed: %v", err)
 	}
