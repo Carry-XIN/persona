@@ -63,16 +63,42 @@ func toolSetOf(ctx context.Context) string {
 	return set
 }
 
-// roundToolNames are the tools a round lists: the ones the background supervisor was seen using, and the ones its
-// supervision message tells it to use (ask_escalate for a card, list_followups beside the follow-ups, kb_get beside
-// kb_search), in the order of the lists they come from, so the cached prefix stays the same from round to round. Not
-// in it: ask_user (it escalates with task_review needs_user), conversation_send (a leader stuck is the main chat's),
-// task_start_keys and task_retry (failed starts go to the main chat), and the phone's, mail, inbox, view, model,
-// to-do writing, settings, leader and direction tools. lark_search is listed when its extension gives it.
+// roundToolNames are the tools a round lists, and why each is in: the ones its supervision work uses (follow-ups,
+// computers and agents, an agent's cards, the knowledge base, the tasks' plans, reviews and scope, a conversation's
+// words), and the ones its prompts point it to: ask_escalate for a card (the supervision instructions), task_decided for
+// a decision_reply entry (its message asks it to confirm the owner's answer with it, and the tool lets the background
+// supervisor record it), todo_get where its message says what crosses rounds is kept, and todo_list, agents_list,
+// list_followups and kb_get where the snapshot leaves items out. lark_search, or larkcli_search from the lark-cli
+// connector, is listed when the install gives it.
+// roundTools keeps them in the order of the lists they come from, so the cached prefix stays the same from round to
+// round. Every tool a round's own message names is here, and the descriptions of these tools and the background
+// supervisor's context name the others only in passing (TestRoundListsTheToolsItsMessageNames, roundPassingMentions
+// there); every other tool the supervision instructions name is in roundToolsWithheld with why, and the instructions'
+// background line sends that work elsewhere too (TestRoundToolsAgreeWithSupervisionInstructions). Left out as well, and
+// why: the phone's, mail, inbox, view, place and routine tools (the owner's own errands; an inbox signal leaves replies
+// to the Inbox's own draft); the model, settings, secret, skill and concern tools (the owner's changes, made in the
+// main conversation); the repository and other to-do writing tools (the background supervisor is not a direction and
+// records no work of its own); and the other agent, conversation, leader and direction tools (a supervised replacement
+// starts with task_plan on the same todo, and what needs another conversation is the main conversation's).
 var roundToolNames = []string{"notify_user", "supervision_finish", "schedule_followup", "list_followups", "cancel_followup",
 	"machines_list", "agents_list", "agent_read", "agent_send", "agent_interrupt", "agent_archive", "interaction_answer",
 	"ask_escalate", "kb_search", "kb_get", "kb_update", "conversation_read", "task_plan", "task_review", "task_scope",
-	"task_start_screen", "todo_get", "lark_search"}
+	"task_decided", "todo_get", "todo_list", "lark_search", "larkcli_search"}
+
+// roundToolsWithheld are the tools the supervision instructions name that a round does not list, each with why the
+// background supervisor has no use for it in a round. The instructions every supervisor reads also tell it so (their
+// background line), so the supervision instructions never send a round to a tool it lacks.
+var roundToolsWithheld = map[string]string{
+	"ask_user":          "an owner decision from the background supervisor is a task_review needs_user conclusion card, never ask_user (the instructions' background line)",
+	"conversation_send": "leader_stuck goes to the main conversation (digestTo)",
+	"task_start_screen": "failed and started go to the main conversation, and only it remedies a start (remedyTool)",
+	"task_start_keys":   "failed and started go to the main conversation, and only it remedies a start (remedyTool)",
+	"task_retry":        "failed and started go to the main conversation, and only it retries a start (toolTaskRetry)",
+	"agent_supervise":   "only the main conversation adopts an agent opened outside supervision (toolAgentSupervise)",
+	"todo_create":       "a direction's own work: the background supervisor is not a direction and records no to-dos",
+	"todo_complete":     "a direction's own work: the background supervisor is not a direction and records no to-dos",
+	"leader_progress":   "a direction's own work: only a leader conversation reports progress (toolLeaderProgress)",
+}
 
 // roundTools are the tools of list a round lists, in list's order.
 func roundTools(list []proto.Tool) []proto.Tool {

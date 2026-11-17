@@ -319,6 +319,7 @@ type Snapshot struct {
 	Working         []SnapshotAgent
 	Workflows       []SnapshotWorkflow // background workflow runs still running, newest first
 	PhoneOnline     bool
+	NoPhone         bool               // leaves the iPhone line out: the background supervisor's (assistant/context.go backgroundSnapshot)
 	Apps            []SnapshotApp      // one per kind of device, the user's own before a simulator
 	KB              string             // RenderKBDigest, "" leaves it out
 	Chats           *SnapshotChats     // nil: Feishu did not answer in time

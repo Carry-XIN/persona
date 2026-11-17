@@ -543,11 +543,18 @@ func TestRoundToolSet(t *testing.T) {
 		t.Fatalf("the round's tools %v, want %v", round, want)
 	}
 	for _, n := range roundToolNames {
-		if n != "lark_search" && !slices.Contains(round, n) { // lark_search comes with its extension, not here
+		if !slices.Contains(roundConnectorTools, n) && !slices.Contains(round, n) { // they come with their extension or connector, not here
 			t.Errorf("the round lacks %s", n)
 		}
 	}
-	for _, n := range []string{"ask_user", "conversation_send", "task_start_keys", "task_retry", "persona_settings", "todo_create"} {
+	// task_decided confirms the owner's answer a decision_reply entry brings; todo_list is where the snapshot sends it for
+	// the tasks it leaves out.
+	for _, n := range []string{"task_decided", "todo_list", "todo_get", "task_review", "notify_user"} {
+		if !slices.Contains(round, n) {
+			t.Errorf("the round lacks %s", n)
+		}
+	}
+	for _, n := range []string{"ask_user", "conversation_send", "task_start_screen", "task_start_keys", "task_retry", "persona_settings", "todo_create"} {
 		if slices.Contains(round, n) {
 			t.Errorf("the round lists %s", n)
 		}
