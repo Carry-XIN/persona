@@ -16,7 +16,8 @@ import (
 // this hub does not know (a plugin written for a newer hub) are left out, a section they emptied with them; those
 // newer than the app are drawn with what it knows where that says the same (a markdown as text, a table as rows, an
 // empty state as a text and a button, a section's more as a button, a filter as a segmented, a columns view as a
-// stack, a section's link as a row, a tile's gauge as its value and subtitle), left out where it does not; refresh_after is held to its bounds. The view the extension drew is checked first (CheckView), whatever the
+// stack, a section's link as a row, a tile's gauge as its value and subtitle, a graph as indented rows), left out
+// where it does not; refresh_after is held to its bounds. The view the extension drew is checked first (CheckView), whatever the
 // app draws, so that a view is refused or drawn alike for every app; then what the app gets is checked again
 // (wire.CheckFitted), a compact one to its limits. It says what types it left out.
 func Fit(v *View, slot UISlot, uiVersion int, languages ...i18n.Lang) (dropped []string, err error) {
@@ -65,6 +66,10 @@ func fit(v *View, slot UISlot, uiVersion int, native bool, languages ...i18n.Lan
 		if err := checkCompact6(v); err != nil {
 			return dropped, err
 		}
+	}
+	// a native stream's components never include a graph, even at 10: it gets the rows always
+	if native || uiVersion < 10 {
+		downgrade10(v, native, compact)
 	}
 	if uiVersion < 9 {
 		downgrade9(v)
@@ -119,6 +124,7 @@ func fit(v *View, slot UISlot, uiVersion int, native bool, languages ...i18n.Lan
 		for _, s := range v.Sections {
 			n += len(s.Items)
 			for _, e := range s.Items {
+				// a graph is one item of the card; its nodes still count toward the page's 300 (wire.CheckView)
 				n += max(len(e.Tiles)-1, 0)
 				if e.Type == "field" || e.Type == "composer" {
 					return dropped, errors.New("a card has no fields: open a page for them")
