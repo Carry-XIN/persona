@@ -28,6 +28,7 @@ import { ExtensionChart } from "./view-sections-lazy";
 import { NEW_ICON_GLYPH } from "./icon-map";
 import { SegmentedTrack } from "../../ui/Segmented";
 import { colorOf, hue, hueTint } from "../../lib/extension-ui-v6";
+import { extensionOwner } from "../../lib/extension-owner";
 import { Badge, Carousel, DateInput, glyphOf, Grid, ImageItem, MultiChoice, MultilineInput, SliderLine, Sparkline, TrailingControl, useImage, useRowMenu, type V6Handlers } from "./ViewBody6";
 
 // UI version 4's code hosting items (CodeViews.tsx, DiffReview.tsx) are their own chunks too: only an extension's code
@@ -50,10 +51,19 @@ const Sections8 = lazyPage<ViewHandlers & { view: UIView; embedded?: boolean; co
 
 // UI version 10's graph canvas (ViewBody10.tsx) is a chunk of its own as well: only an extension's page or card with a
 // graph draws it, so it stays out of the first screen and the idle preload. It loads with the first view that has one;
-// meanwhile the space keeps its height and shows nothing (the graph is a canvas of its own, not a row).
-const GraphCanvas = lazyPage<{ item: UIItem; compact?: boolean; busy: string; onPress: (a: UIAction, destructive?: boolean) => void; canPress?: (a: UIAction) => boolean }>(
-  () => import("./ViewBody10").then((m) => m.GraphCanvas),
-);
+// meanwhile the space keeps its height and shows nothing (the graph is a canvas of its own, not a row). A compact
+// card's fallback mirrors the drawn card's own wrapper (px-4 py-3 around the 200 px preview), so the card does not
+// jump when the chunk arrives. `scope` says whose view it is, so two owners' graphs never share what a key keeps.
+const GraphCanvas = lazyPage<
+  {
+    item: UIItem;
+    compact?: boolean;
+    busy: string;
+    onPress: (a: UIAction, destructive?: boolean) => void;
+    canPress?: (a: UIAction) => boolean;
+    scope?: string;
+  }
+>(() => import("./ViewBody10").then((m) => m.GraphCanvas));
 
 function CodeItem({ children }: { children: ReactNode }) {
   return <Suspense fallback={<Loading />}>{children}</Suspense>;
@@ -413,12 +423,13 @@ function NativeItem({ item: it, compact, values, setValue, busy, onPress, onChoo
         </div>
       );
     // UI version 10: a graph is a canvas of its own (ViewBody10.tsx), drawn from its own chunk; the space keeps its
-    // height meanwhile, so the page does not jump when it comes in
+    // height meanwhile, so the page does not jump when it comes in. The graph's owner (the extension) scopes what
+    // its keys keep; unknown there, the page's own path does.
     case "graph":
       return (
         <div className={compact ? "" : "graph-canvas"}>
-          <Suspense fallback={<div className={compact ? "graph-preview" : "h-full w-full"} aria-hidden />}>
-            <GraphCanvas item={it} compact={compact} busy={busy} onPress={onPress} canPress={canPress} />
+          <Suspense fallback={<div className={compact ? "px-4 py-3" : "h-full w-full"} aria-hidden>{compact && <div className="graph-preview" />}</div>}>
+            <GraphCanvas item={it} compact={compact} busy={busy} onPress={onPress} canPress={canPress} scope={extensionOwner()} /> {/* lib/extension-owner.ts: whose view this is */}
           </Suspense>
         </div>
       );
