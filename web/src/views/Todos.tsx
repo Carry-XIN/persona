@@ -1337,13 +1337,15 @@ const SECTION_TONE: Record<TriageSection, string> = {
   cancelled: "text-ink-3",
 };
 
-/** A section's title: only a section made entirely of unaccepted deliveries uses the awaiting-review wording. */
+/** A section's title: agent states share the state names; only a section made entirely of unaccepted deliveries uses
+ *  the awaiting-review wording. */
 function sectionTitle(section: TriageSection, rules: readonly TriageRule[]): string {
-  if (section === "waiting") return t("todos.section_waiting");
+  if (section === "waiting") return stateName("needs_you");
   if (section === "working") return stateName("working");
   if (section === "just_done" && rules.length > 0 && rules.every((rule) => rule === "finished_unseen")) {
     return t("todos.section_awaiting_review");
   }
+  if (section === "just_done") return stateName("just_finished");
   return t(`todos.section_${section}`);
 }
 
