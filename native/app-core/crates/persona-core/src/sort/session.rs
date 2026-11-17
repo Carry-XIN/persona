@@ -4,7 +4,20 @@
 
 use serde::Deserialize;
 
-use crate::state::WorkState;
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub struct WorkState {
+    pub phase: String,
+    #[serde(default)]
+    pub on: Option<String>,
+    #[serde(default)]
+    pub wait: Option<String>,
+    #[serde(default)]
+    pub wake_at: Option<String>,
+    #[serde(default)]
+    pub agent: Option<serde_json::Value>,
+    #[serde(default)]
+    pub just_finished: bool,
+}
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct Session {

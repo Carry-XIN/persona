@@ -28,6 +28,8 @@ data class AgentSession(
      * muted ([awaitsReply] with the mutes): its space stays open and it stays out of the idle folds.
      */
     val asksYou: Boolean get() = state == AgentState.Idle && session.awaitsReply
+    /** A triaged-done turn nobody has opened yet; muted rows remain ordinary Seen. */
+    val justFinished: Boolean get() = state == AgentState.Idle && session.work?.justFinished == true
     /** Working, but all it still runs in the background only waits (iOS `Session.waitsInBackground`, #6045). */
     val waitsInBackground: Boolean get() = state == AgentState.Working && session.backgroundWaiting &&
         (session.children?.working ?: 0) == 0 && (session.children?.needsYou ?: 0) == 0
@@ -40,8 +42,9 @@ data class AgentSession(
         // a summary row's count also covers a run it sends no progress for (an older runtime's background entry, #5888)
         (session.runningWorkflows.isNotEmpty() || (session.waiting != null && (session.runningWorkflowsCount ?: 0) > 0))
     fun awaitsReply(mutes: AgentPreferences): Boolean = asksYou && !mutes.mutes(this)
+    fun justFinished(mutes: AgentPreferences): Boolean = justFinished && !mutes.mutes(this)
     /** Held rows stay out of idle folds; quiet-space membership separately includes [AgentSpace.quiet]. */
-    fun stays(mutes: AgentPreferences): Boolean = !isQuiet || heldInList || isWaiting || awaitsReply(mutes)
+    fun stays(mutes: AgentPreferences): Boolean = !isQuiet || heldInList || isWaiting || awaitsReply(mutes) || justFinished(mutes)
     val updatedAt: Instant? get() = parseTime(session.updatedAt)
     val sortDate: Instant? get() = if (state == AgentState.Working) parseTime(stateSince) ?: updatedAt else updatedAt
     val spacePreferenceKey: String? get() = session.spaceName?.let { "${session.machineId}/$it" }
