@@ -104,15 +104,17 @@ final class IPadSidebarTests: XCTestCase {
     @MainActor func testTheFaceComesBackWithTheColumnFolded() {
         XCUIDevice.shared.orientation = .landscapeLeft
         app.launchPinned()
-        let bar = element("persona-avatar"), fold = element("assistant-sidebar-button")
+        // The column folds from its head; the page's sidebar button is there only while it is away (#4206).
+        let bar = element("persona-avatar"), fold = element("sidebar-fold-column"), back = element("assistant-sidebar-button")
         XCTAssertTrue(element("sidebar-main").waitForExistence(timeout: 20), "no Persona column:\n\(app.debugDescription)")
-        XCTAssertTrue(bar.waitForExistence(timeout: 10) && fold.exists, "no top bar:\n\(app.debugDescription)")
+        XCTAssertTrue(bar.waitForExistence(timeout: 10) && fold.exists, "no top bar or fold:\n\(app.debugDescription)")
         XCTAssertLessThan(bar.frame.height, 56, "a face beside the column: \(bar.frame)")
         fold.tap()
         XCTAssertTrue(waitFor { !self.element("sidebar-main").isHittable }, "the column did not fold")
         XCTAssertTrue(waitFor { bar.frame.height >= 56 }, "no face with the column folded: \(bar.frame)")
         shot("folded-landscape")
-        fold.tap()
+        XCTAssertTrue(back.waitForExistence(timeout: 5), "nothing brings the column back:\n\(app.debugDescription)")
+        back.tap()
         XCTAssertTrue(waitFor { self.element("sidebar-main").isHittable }, "the column did not come back")
         XCTAssertTrue(waitFor { bar.frame.height < 56 }, "the face stayed with the column out: \(bar.frame)")
     }
