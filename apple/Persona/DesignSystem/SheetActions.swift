@@ -26,13 +26,22 @@ struct SheetClose: ToolbarContent {
 
     var body: some ToolbarContent {
         ToolbarItem(placement: .cancellationAction) {
-            // The ink on the icon itself: a bar ignores a foreground style set on the button (docs/lessons/ios.md).
-            Button(role: .close, action: action) { ThemedIcon(Theme.Icon.close).sheetBarLabel() }
+            closeButton
                 .tint(Color.primary)
                 .disabled(disabled)
                 .keyboardShortcut(.cancelAction)
                 .accessibilityLabel(Text("Close"))
                 .accessibilityIdentifier(id)
+        }
+    }
+
+    @ViewBuilder private var closeButton: some View {
+        // The ink on the icon itself: a bar ignores a foreground style set on the button (docs/lessons/ios.md).
+        if #available(iOS 26.0, *) {
+            Button(role: .close, action: action) { ThemedIcon(Theme.Icon.close).sheetBarLabel() }
+        } else {
+            // iOS 18 has no close role (#6730): the same ✕ on a plain button.
+            Button(action: action) { ThemedIcon(Theme.Icon.close).sheetBarLabel() }
         }
     }
 }
@@ -59,10 +68,20 @@ struct SheetConfirm: ToolbarContent {
             if busy {
                 ProgressView().accessibilityIdentifier(id)
             } else {
-                Button(role: .confirm, action: action)
+                confirmButton
                     .disabled(disabled)
                     .accessibilityIdentifier(id)
             }
+        }
+    }
+
+    @ViewBuilder private var confirmButton: some View {
+        if #available(iOS 26.0, *) {
+            Button(role: .confirm, action: action)
+        } else {
+            // iOS 18 has no confirm role (#6730): a ✓ in the accent, read as Done.
+            Button(action: action) { ThemedIcon(Theme.Icon.done) }
+                .accessibilityLabel(Text("Done"))
         }
     }
 }

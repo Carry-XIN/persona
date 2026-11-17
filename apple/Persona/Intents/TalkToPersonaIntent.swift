@@ -10,6 +10,7 @@ struct TalkToPersonaIntent: AppIntent {
         categoryName: "Chat",
         searchKeywords: ["Persona", "voice", "talk", "chat", "CarPlay", "voice", "chat"]
     )
+    @available(iOS 26.0, *)
     nonisolated static var supportedModes: IntentModes { .background }
 
     nonisolated init() {}

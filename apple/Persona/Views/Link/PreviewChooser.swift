@@ -36,12 +36,20 @@ struct PreviewChooser: View {
         NavigationStack {
             content
                 .navigationTitle(String(localized: "Preview"))
-                .navigationSubtitle(machineName + " · " + Fmt.path(preview.cwd, home: machine?.home))
+                .navigationSubtitleWhenSupported(machineName + " · " + Fmt.path(preview.cwd, home: machine?.home))
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
-                        Button(role: .close) { dismiss() }
-                            .accessibilityIdentifier("preview-close")
+                        Group {
+                            if #available(iOS 26.0, *) {
+                                Button(role: .close) { dismiss() }
+                            } else {
+                                // iOS 18 has no close role (#6730): the same ✕ on a plain button.
+                                Button { dismiss() } label: { ThemedIcon(Theme.Icon.close) }
+                                    .accessibilityLabel(Text("Close"))
+                            }
+                        }
+                        .accessibilityIdentifier("preview-close")
                     }
                 }
         }

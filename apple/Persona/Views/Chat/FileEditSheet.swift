@@ -22,7 +22,7 @@ struct FileEditSheet: View {
             }
             .ignoresSafeArea(.container, edges: .bottom)
             .navigationTitle(edit.name)
-            .navigationSubtitle(edit.dirty ? String(localized: "Edited") : model.machine(edit.ref.machineRef)?.name ?? edit.ref.machineID)
+            .navigationSubtitleWhenSupported(edit.dirty ? String(localized: "Edited") : model.machine(edit.ref.machineRef)?.name ?? edit.ref.machineID)
             .navigationBarTitleDisplayMode(.inline)
             .pageToolbar {
                 ToolbarItem(placement: .cancellationAction) {

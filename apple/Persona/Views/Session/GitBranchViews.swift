@@ -67,7 +67,7 @@ struct GitBranchesSheet: View {
             .autocorrectionDisabled()
             .textInputAutocapitalization(.never)
             .navigationTitle(Text("Branches"))
-            .navigationSubtitle(status.branch ?? String(localized: "Detached HEAD"))
+            .navigationSubtitleWhenSupported(status.branch ?? String(localized: "Detached HEAD"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
@@ -221,7 +221,7 @@ struct GitStashesSheet: View {
             .themedPage()
             .refreshable { await refresh() }
             .navigationTitle(Text("Stashes"))
-            .navigationSubtitle(status.branch ?? String(localized: "Detached HEAD"))
+            .navigationSubtitleWhenSupported(status.branch ?? String(localized: "Detached HEAD"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
