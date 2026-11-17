@@ -3,6 +3,12 @@ import SwiftUI
 import UIKit
 import PersonaWire
 
+/// Reload when either the component or its hub/page namespace changes.
+private struct ExtensionGraphInput: Hashable {
+    var graph: ExtensionGraphComponent
+    var namespace: String
+}
+
 /// UI version 10's native graph canvas. Layout and restoration belong to `ExtensionGraphModel`; this file only draws
 /// the prepared scene and turns gestures into transform or fold changes. Compact cards are still previews which open
 /// the same model in a full-screen cover, never a second graph with separate state.
@@ -12,6 +18,7 @@ struct ExtensionGraph: View {
     @Binding var link: LinkTarget?
 
     @Environment(\.pluginUICompact) private var compact
+    @Environment(\.extensionPicture) private var picture
     @Environment(\.dynamicTypeSize) private var typeSize
     @State private var model: ExtensionGraphModel?
     @State private var fullScreen = false
@@ -19,9 +26,9 @@ struct ExtensionGraph: View {
 
     var body: some View {
         content
-            .task(id: graph) {
-                if model == nil || model?.persistenceKey != (graph.key ?? "") {
-                    model = ExtensionGraphModel(graph: graph)
+            .task(id: ExtensionGraphInput(graph: graph, namespace: persistenceNamespace)) {
+                if model == nil || model?.componentKey != (graph.key ?? "") || model?.namespace != persistenceNamespace {
+                    model = ExtensionGraphModel(graph: graph, namespace: persistenceNamespace, keeps: controller != nil)
                 }
                 await model?.reload(graph)
             }
@@ -29,7 +36,9 @@ struct ExtensionGraph: View {
                 NavigationStack {
                     if let model {
                         ExtensionGraphCanvas(graph: graph, model: model, controller: controller, link: $link,
-                                             preview: false, showsFullScreen: false, onFullScreen: openFullScreen)
+                                             preview: false, picture: false, covered: false, showsFullScreen: false,
+                                             onFullScreen: openFullScreen, onNodePush: { fullScreen = false })
+                            .accessibilityIdentifier("extension-graph-cover")
                             .background(Theme.pageBackground)
                             .navigationTitle(coverTitle(model))
                             .navigationBarTitleDisplayMode(.inline)
@@ -60,14 +69,27 @@ struct ExtensionGraph: View {
 
     @ViewBuilder private var content: some View {
         if compact {
-            Button { openFullScreen() } label: {
-                canvas(preview: true)
-                    .allowsHitTesting(false)
+            if picture {
+                let model = ExtensionGraphModel.picture(graph)
+                ExtensionGraphCanvas(graph: graph, model: model, controller: nil, link: $link,
+                                     preview: true, picture: true, covered: false, showsFullScreen: false,
+                                     onFullScreen: {}, onNodePush: {})
                     .scaledFrame(height: Theme.Size.graphPreviewHeight)
+            } else {
+                ZStack {
+                    canvas(preview: true)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                    Button(action: openFullScreen) {
+                        Color.clear.contentShape(.rect)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(String(localized: "Open Graph Full Screen"))
+                    .accessibilityIdentifier("extension-graph-preview")
+                }
+                .scaledFrame(height: Theme.Size.graphPreviewHeight)
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel(String(localized: "Open Graph Full Screen"))
-            .accessibilityIdentifier("extension-graph-preview")
         } else {
             canvas(preview: false)
                 .containerRelativeFrame(.vertical) { visible, _ in
@@ -83,12 +105,26 @@ struct ExtensionGraph: View {
         ZStack {
             if let model, model.layout != nil {
                 ExtensionGraphCanvas(graph: graph, model: model, controller: controller, link: $link,
-                                     preview: preview, showsFullScreen: !preview, onFullScreen: openFullScreen)
+                                     preview: preview, picture: false, covered: fullScreen, showsFullScreen: !preview,
+                                     onFullScreen: openFullScreen, onNodePush: { fullScreen = false })
             } else {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .background(Theme.pageBackground)
+    }
+
+    private var persistenceNamespace: String {
+        guard let controller else { return "" }
+        let base: String
+        if let page = controller as? ExtensionViewModel {
+            base = page.graphPersistenceNamespace
+        } else if let card = controller as? AssistantViewModel {
+            base = ["assistant", card.scope.group, card.scope.conversation, card.key, card.page ?? ""].joined(separator: "\n")
+        } else {
+            return ""
+        }
+        return base + "\n" + (compact ? "compact" : "page")
     }
 
     private func openFullScreen() {
@@ -112,8 +148,13 @@ private struct ExtensionGraphCanvas: View {
     var controller: (any ExtensionViewControlling)?
     @Binding var link: LinkTarget?
     var preview: Bool
+    /// A synchronous still for ImageRenderer: its transform is computed from the viewport, never restored or animated.
+    var picture: Bool
+    /// True for the inline canvas while its full-screen cover is in front. An untouched inline canvas refits on return.
+    var covered: Bool
     var showsFullScreen: Bool
     var onFullScreen: () -> Void
+    var onNodePush: () -> Void
 
     @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -131,12 +172,14 @@ private struct ExtensionGraphCanvas: View {
         GeometryReader { geometry in
             if let layout = model.layout {
                 let content = contentSize(layout)
+                let transform = picture ? ExtensionGraphTransform.fit(content, in: geometry.size,
+                    minimum: Theme.Size.graphPreviewMinScale, maximum: 1) : model.transform
                 ZStack(alignment: .topLeading) {
                     Theme.pageBackground
                     scene(layout)
                         .frame(width: content.width, height: content.height, alignment: .topLeading)
-                        .scaleEffect(model.transform.scale, anchor: .topLeading)
-                        .offset(x: model.transform.x, y: model.transform.y)
+                        .scaleEffect(transform.scale, anchor: .topLeading)
+                        .offset(x: transform.x, y: transform.y)
                     if !preview {
                         foldControls(layout)
                     }
@@ -171,7 +214,14 @@ private struct ExtensionGraphCanvas: View {
                     fitIfNeeded(layout, content: content, viewport: geometry.size)
                 }
                 .onChange(of: geometry.size) { _, size in
+                    model.requestOpeningFit()
                     fitIfNeeded(layout, content: content, viewport: size)
+                }
+                .onChange(of: covered) { _, covered in
+                    if !covered {
+                        model.requestOpeningFit()
+                        fitIfNeeded(layout, content: content, viewport: geometry.size)
+                    }
                 }
             }
         }
@@ -184,9 +234,9 @@ private struct ExtensionGraphCanvas: View {
             edgeLayer(layout)
             ForEach(layout.order, id: \.self) { id in
                 if let node = model.nodesByID[id], let point = layout.at[id] {
-                    ExtensionGraphPlacedNode(node: node, selected: graph.selected == id,
+                    ExtensionGraphPlacedNode(node: node, selected: graph.selected == id, folded: model.folded.contains(id),
                                              parentTitle: model.parentTitles[id], layout: layout, controller: controller,
-                                             link: $link, reduceMotion: reduceMotion) {
+                                             link: $link, reduceMotion: reduceMotion, onNodePush: onNodePush) {
                         Task { await model.toggleFold(id) }
                     }
                     .scaledFrame(width: Theme.Size.graphNodeWidth, height: Theme.Size.graphNodeHeight)
@@ -344,7 +394,7 @@ private struct ExtensionGraphCanvas: View {
     }
 
     private func fitIfNeeded(_ layout: ExtensionGraphLayouter.Result, content: CGSize, viewport: CGSize) {
-        guard model.needsFit, viewport.width > 0, viewport.height > 0 else { return }
+        guard !picture, !covered, model.needsFit || !model.touched, viewport.width > 0, viewport.height > 0 else { return }
         var fitted = ExtensionGraphTransform.fit(content, in: viewport,
             minimum: preview ? Theme.Size.graphPreviewMinScale : 0.5, maximum: 1)
         if !preview, let selected = graph.selected, let point = layout.at[selected] {
@@ -390,11 +440,13 @@ private struct ExtensionGraphCanvas: View {
 private struct ExtensionGraphPlacedNode: View {
     var node: ExtensionGraphNode
     var selected: Bool
+    var folded: Bool
     var parentTitle: String?
     var layout: ExtensionGraphLayouter.Result
     var controller: (any ExtensionViewControlling)?
     @Binding var link: LinkTarget?
     var reduceMotion: Bool
+    var onNodePush: () -> Void
     var fold: () -> Void
 
     private var accent: Color? {
@@ -406,7 +458,7 @@ private struct ExtensionGraphPlacedNode: View {
         Group {
             if let action = node.action, let controller {
                 ExtensionActionButton(action: action, title: node.title, model: controller, values: [:], link: $link,
-                                      identifier: "extension-graph-node-\(node.id)") { face }
+                                      identifier: "extension-graph-node-\(node.id)", onPush: onNodePush) { face }
                     .buttonStyle(.plain)
             } else {
                 face.accessibilityIdentifier("extension-graph-node-\(node.id)")
@@ -493,8 +545,8 @@ private struct ExtensionGraphPlacedNode: View {
 
     private var foldName: String {
         guard let hidden = layout.folds[node.id] else { return "" }
-        // The model's current fold state is carried by the fold control; the custom action is offered only when useful.
-        return hidden > 0 ? String(localized: "Show \(hidden) hidden") : String(localized: "Fold")
+        // Another parent can keep every child visible in a layered graph, so the actual fold state names the action.
+        return folded ? String(localized: "Show \(hidden) hidden") : String(localized: "Fold")
     }
 }
 

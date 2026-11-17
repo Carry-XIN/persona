@@ -107,6 +107,20 @@ struct AssistantViewModelTests {
         _ = await model.perform(AssistantViewModel.actions(card)[0])
         #expect(model.selected("submit") && model.attempt == nil && model.values["task"] == "已选结果")
     }
+    @Test func graphNodeActionsNavigateInsideTheAssistantCard() async {
+        let push = ExtensionAction(id: "node-details", push: ExtensionPush(page: "details"))
+        let graph = ExtensionGraphComponent(key: "work", nodes: [
+            ExtensionGraphNode(id: "node", title: "Node", action: push)
+        ])
+        let details = ExtensionView(sections: [ExtensionSection(items: [.text(ExtensionTextComponent(text: "Details"))])])
+        let card = ExtensionView(sections: [ExtensionSection(items: [.graph(graph)])], pages: ["details": details])
+        #expect(AssistantViewModel.actions(card).contains(push))
+        let model = AssistantViewModel(key: "view_example", scope: scope, view: card, store: AssistantViewsStore(),
+            deps: .init(send: { _ in Issue.record("a graph push sent a reply"); throw CancellationError() }))
+        _ = await model.perform(push)
+        #expect(model.page == "details")
+    }
+
     @Test func navigationStaysInsideTheCardAndDropsRemovedPages() async {
         let push = ExtensionAction(id: "details", push: ExtensionPush(page: "details"))
         let pop = ExtensionAction(id: "back", pop: true)

@@ -301,6 +301,11 @@ extension APIClient {
     /// A refresh held back while busy is retried once the current operation ends; starting a request does not change the task key.
     private(set) var completedOperations = 0
     var group: String { deps.api()?.group ?? "" }
+    /// The page identity beneath a graph's component key. The graph hashes this before using it as a persistence key.
+    var graphPersistenceNamespace: String {
+        [deps.api()?.config.url.absoluteString ?? "", group, selectedManager ?? "", plugin, ui,
+         context.launcher ?? "", context.machine ?? "", context.item ?? "", initialState ?? ""].joined(separator: "\n")
+    }
 
     func invalidate() {
         invalidationVersion += 1

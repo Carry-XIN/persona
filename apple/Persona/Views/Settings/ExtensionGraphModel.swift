@@ -1,4 +1,5 @@
 import CoreGraphics
+import CryptoKit
 import Foundation
 import Observation
 import PersonaWire
@@ -94,8 +95,8 @@ private actor ExtensionGraphDiskStore {
 /// restoration happen on reload; a redraw with the same key retains explicit fold choices and a touched transform.
 @MainActor @Observable final class ExtensionGraphModel {
     @ObservationIgnored private(set) var graph: ExtensionGraphComponent
-    @ObservationIgnored private(set) var nodesByID: [String: ExtensionGraphNode]
-    @ObservationIgnored private(set) var parentTitles: [String: String]
+    private(set) var nodesByID: [String: ExtensionGraphNode]
+    private(set) var parentTitles: [String: String]
     private(set) var layout: ExtensionGraphLayouter.Result?
     private(set) var folded: Set<String>
     private(set) var transform = ExtensionGraphTransform()
@@ -103,6 +104,8 @@ private actor ExtensionGraphDiskStore {
     private(set) var needsFit = true
     private(set) var layoutVersion = 0
 
+    @ObservationIgnored let componentKey: String
+    @ObservationIgnored let namespace: String
     @ObservationIgnored let persistenceKey: String
     @ObservationIgnored private let keeps: Bool
     @ObservationIgnored private let onSave: ((ExtensionGraphSavedState) -> Void)?
@@ -111,21 +114,19 @@ private actor ExtensionGraphDiskStore {
     @ObservationIgnored private var revision = 0
 
     /// `keeps: false` is the in-memory store used by tests and share pictures. `restored` injects their starting state.
-    init(graph: ExtensionGraphComponent, restored: ExtensionGraphSavedState? = nil, keeps: Bool = true,
-         onSave: ((ExtensionGraphSavedState) -> Void)? = nil) {
+    init(graph: ExtensionGraphComponent, namespace: String = "", restored: ExtensionGraphSavedState? = nil,
+         keeps: Bool = true, onSave: ((ExtensionGraphSavedState) -> Void)? = nil) {
         self.graph = graph
         nodesByID = Dictionary(uniqueKeysWithValues: graph.nodes.map { ($0.id, $0) })
         parentTitles = Self.parentTitles(graph)
-        persistenceKey = graph.key ?? ""
+        componentKey = graph.key ?? ""
+        self.namespace = namespace
+        persistenceKey = Self.makePersistenceKey(graph.key, namespace: namespace)
         self.keeps = keeps
         self.onSave = onSave
         foldChoices = restored?.folds ?? [:]
         self.restored = restored != nil || !keeps || graph.key?.isEmpty != false
-        var folds = Set(graph.folded ?? [])
-        for (id, folded) in foldChoices {
-            if folded { folds.insert(id) } else { folds.remove(id) }
-        }
-        folded = folds
+        folded = Self.folds(for: graph, choices: foldChoices)
         if let restored {
             transform = restored.transform
             touched = restored.touched
@@ -133,8 +134,23 @@ private actor ExtensionGraphDiskStore {
         }
     }
 
-    /// Recomputes only what follows from nodes, edges or folds. The task is keyed by the whole graph in the view, so a
-    /// state-only redraw produces the same positions. A superseded computation never replaces a newer fold or view.
+    private static func makePersistenceKey(_ key: String?, namespace: String) -> String {
+        guard let key, !key.isEmpty else { return "" }
+        guard !namespace.isEmpty else { return key }
+        // Component keys are unique only within a page. Hash the hub/page namespace rather than persisting its URL.
+        let digest = SHA256.hash(data: Data((namespace + "\n" + key).utf8))
+        return key + "-" + digest.prefix(16).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// ImageRenderer is synchronous and never runs `.task`: prepare one still scene per render pass, with no disk state.
+    static func picture(_ graph: ExtensionGraphComponent) -> ExtensionGraphModel {
+        let model = ExtensionGraphModel(graph: graph, keeps: false)
+        model.layout = ExtensionGraphLayouter.layout(graph)
+        return model
+    }
+
+    /// Recomputes only when the node arrangement, edges, direction or effective folds change. A state-only redraw
+    /// reuses the prepared scene. A superseded computation never replaces a newer fold or view.
     func reload(_ next: ExtensionGraphComponent) async {
         revision += 1
         let revision = revision
@@ -144,14 +160,43 @@ private actor ExtensionGraphDiskStore {
                 apply(saved)
             }
         }
-        let arranged = await Self.arrange(next, folded: folded)
+        let nextFolded = Self.folds(for: next, choices: foldChoices)
+        let arrangementChanged = layout == nil || folded != nextFolded || !Self.sameArrangement(graph, next)
+        let openingChanged = arrangementChanged || graph.selected != next.selected
+        folded = nextFolded
+        var arranged = layout
+        if arrangementChanged {
+            arranged = await Self.arrange(next, folded: nextFolded)
+        }
         guard revision == self.revision else { return }
         graph = next
         nodesByID = Dictionary(uniqueKeysWithValues: next.nodes.map { ($0.id, $0) })
         parentTitles = Self.parentTitles(next)
-        layout = arranged
-        layoutVersion += 1
-        if !touched { needsFit = true }
+        if let arranged {
+            if layout != arranged { layout = arranged }
+            if openingChanged {
+                layoutVersion += 1
+                if !touched { needsFit = true }
+            }
+        }
+    }
+
+    private static func folds(for graph: ExtensionGraphComponent, choices: [String: Bool]) -> Set<String> {
+        var folds = Set(graph.folded ?? [])
+        for (id, folded) in choices {
+            if folded { folds.insert(id) } else { folds.remove(id) }
+        }
+        return folds
+    }
+
+    /// Only these fields feed `ExtensionGraphLayouter`: titles, badges, tones, progress and actions may change in place.
+    private static func sameArrangement(_ old: ExtensionGraphComponent, _ new: ExtensionGraphComponent) -> Bool {
+        guard old.layout == new.layout, old.direction == new.direction, old.edges == new.edges,
+              old.nodes.count == new.nodes.count else { return false }
+        for (left, right) in zip(old.nodes, new.nodes) where left.id != right.id || left.group != right.group {
+            return false
+        }
+        return true
     }
 
     private static func parentTitles(_ graph: ExtensionGraphComponent) -> [String: String] {
@@ -171,9 +216,7 @@ private actor ExtensionGraphDiskStore {
     func toggleFold(_ id: String) async {
         guard layout?.folds[id] != nil else { return }
         let next = !folded.contains(id)
-        if next { folded.insert(id) } else { folded.remove(id) }
         foldChoices[id] = next
-        if !touched { needsFit = true }
         persist()
         await reload(graph)
     }
@@ -209,11 +252,7 @@ private actor ExtensionGraphDiskStore {
 
     private func apply(_ saved: ExtensionGraphSavedState) {
         foldChoices = saved.folds
-        var folds = Set(graph.folded ?? [])
-        for (id, folded) in foldChoices {
-            if folded { folds.insert(id) } else { folds.remove(id) }
-        }
-        folded = folds
+        folded = Self.folds(for: graph, choices: foldChoices)
         transform = saved.transform
         touched = saved.touched
         needsFit = !saved.touched

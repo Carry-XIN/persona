@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import Observation
 import Testing
 @testable import Persona
 import PersonaWire
@@ -24,10 +25,27 @@ struct ExtensionGraphModelTests {
         #expect(model.layout?.order == ["root", "a", "b"])
         #expect(model.transform == saved.transform && model.touched && !model.needsFit)
         let before = model.layout?.at
+        let version = model.layoutVersion
 
         await model.reload(graph(folded: ["root"], badge: "Done"))
         #expect(model.layout?.at == before, "state changes do not move any node")
+        #expect(model.layoutVersion == version, "state changes reuse the prepared layout")
         #expect(model.transform == saved.transform && !model.needsFit)
+    }
+
+    @Test func defaultFoldChangesApplyUntilThePersonChooses() async {
+        let model = ExtensionGraphModel(graph: graph(folded: ["root"]), keeps: false)
+        await model.reload(graph(folded: ["root"]))
+        #expect(model.layout?.order == ["root"])
+
+        await model.reload(graph())
+        #expect(model.layout?.order == ["root", "a", "b"], "a new default unfolds when there is no explicit choice")
+        await model.toggleFold("root")
+        await model.reload(graph())
+        #expect(model.folded == ["root"], "an explicit fold wins over the extension's new default")
+        await model.toggleFold("root")
+        await model.reload(graph(folded: ["root"]))
+        #expect(model.folded.isEmpty, "an explicit unfold wins over the extension's new default")
     }
 
     @Test func foldsPersistAndOnlyAnUntouchedCanvasFitsAgain() async {
@@ -49,6 +67,35 @@ struct ExtensionGraphModelTests {
         #expect(model.folded.isEmpty && model.layout?.order == ["root", "a", "b"])
         #expect(!model.needsFit && model.transform == ExtensionGraphTransform(scale: 0.75, x: 12, y: 18))
         #expect(saves.last?.folds == ["root": false], "the explicit unfolded choice is persisted too")
+    }
+
+    @Test func stateOnlyReplacementPublishesNewNodeContent() async {
+        let model = ExtensionGraphModel(graph: graph(), keeps: false)
+        await model.reload(graph())
+        nonisolated(unsafe) var published = false
+        withObservationTracking({ _ = model.nodesByID["root"] }, onChange: { published = true })
+        await model.reload(graph(badge: "Done"))
+        await Task.yield()
+        #expect(published, "a badge-only replacement must redraw the node even when its layout is unchanged")
+        #expect(model.nodesByID["root"]?.badge?.text == "Done")
+    }
+
+    @Test func persistenceKeysAreScopedToTheirPageAndHub() {
+        let first = ExtensionGraphModel(graph: graph(), namespace: "hub-a/page-a", keeps: false)
+        let same = ExtensionGraphModel(graph: graph(), namespace: "hub-a/page-a", keeps: false)
+        let otherPage = ExtensionGraphModel(graph: graph(), namespace: "hub-a/page-b", keeps: false)
+        let otherHub = ExtensionGraphModel(graph: graph(), namespace: "hub-b/page-a", keeps: false)
+        #expect(first.componentKey == "work" && first.persistenceKey == same.persistenceKey)
+        #expect(first.persistenceKey != otherPage.persistenceKey)
+        #expect(first.persistenceKey != otherHub.persistenceKey)
+        #expect(ExtensionGraphModel(graph: graph(), keeps: false).persistenceKey == "work")
+    }
+
+    @Test func aPictureHasItsSceneWithoutATaskOrDiskRestore() {
+        let model = ExtensionGraphModel.picture(graph())
+        #expect(model.layout?.order == ["root", "a", "b"])
+        #expect(model.nodesByID["root"]?.badge?.text == "Running")
+        #expect(!model.touched)
     }
 
     @Test func fitClampsScaleAndCentersTheWholeGraph() {

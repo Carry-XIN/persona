@@ -788,6 +788,7 @@ struct ExtensionLauncherSections: View {
         ForEach(page.shown) { entry in
             if let v = entry.model.view {
                 ExtensionViewRenderer(view: v, model: entry.model, heading: entry.place.title, link: $link)
+                    .environment(\.pluginUICompact, true)
                     .pluginRefresh(entry.model)
             } else {
                 Section {

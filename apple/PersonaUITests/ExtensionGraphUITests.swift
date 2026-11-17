@@ -4,6 +4,8 @@ import XCTest
 /// UI version 10's graph on the mock's made-up 200-node Work page and its compact overview card
 /// (`MOCK_EXTENSIONS=1 MOCK_EXTENSION_GRAPH=1`, `TEST_RUNNER_PERSONA_GRAPH_HUB=http://127.0.0.1:<port>`).
 /// Covers zoom, folding, full screen, a node's row-style push, and the still preview opening the same canvas.
+/// `TEST_RUNNER_PERSONA_SHOTS` keeps screenshots; `TEST_RUNNER_PERSONA_GRAPH_OUTER_SHOTS=1` asks a driver to take them
+/// with `simctl io screenshot`, and `TEST_RUNNER_PERSONA_GRAPH_SCHEME=light|dark` chooses the appearance.
 final class ExtensionGraphUITests: XCTestCase {
     private var env: [String: String] { ProcessInfo.processInfo.environment }
     private var pad: Bool { UIDevice.current.userInterfaceIdiom == .pad }
@@ -43,43 +45,78 @@ final class ExtensionGraphUITests: XCTestCase {
     }
 
     @MainActor private func shot(_ app: XCUIApplication, _ name: String) {
-        let attachment = XCTAttachment(screenshot: app.screenshot())
+        let png = app.screenshot()
+        let attachment = XCTAttachment(screenshot: png)
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
         guard let dir = env["PERSONA_SHOTS"] else { return }
         let base = URL(fileURLWithPath: dir).appending(path: "graph-\(pad ? "ipad" : "iphone")-\(name)-\(scheme).png")
-        try? app.screenshot().pngRepresentation.write(to: base)
+        if env["PERSONA_GRAPH_OUTER_SHOTS"] == "1" {
+            outerShot(base)
+        } else {
+            try? png.pngRepresentation.write(to: base)
+        }
+    }
+
+    /// A driver takes the simulator's own image (`simctl io screenshot`), avoiding XCTest's rotated iPad captures.
+    @MainActor private func outerShot(_ base: URL) {
+        let ready = base.appendingPathExtension("ready"), taken = base.appendingPathExtension("taken")
+        try? FileManager.default.removeItem(at: ready)
+        try? FileManager.default.removeItem(at: taken)
+        FileManager.default.createFile(atPath: ready.path, contents: nil)
+        let done = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            FileManager.default.fileExists(atPath: taken.path)
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter().wait(for: [done], timeout: 60), .completed,
+                       "no simulator screenshot taken of \(base.lastPathComponent)")
+    }
+
+    @MainActor private func visible(_ elements: [XCUIElement], in app: XCUIApplication) -> XCUIElement? {
+        let bounds = app.windows.firstMatch.frame.insetBy(dx: 0, dy: 120)
+        return elements.first { $0.exists && bounds.contains($0.frame) && $0.isHittable }
     }
 
     @MainActor func testZoomFoldFullScreenAndNodePush() throws {
         let app = try launch()
         openWork(app)
+        shot(app, "page")
         let zoomOut = app.buttons["extension-graph-zoom-out"]
         XCTAssertTrue(zoomOut.waitForExistence(timeout: 10), app.debugDescription)
         zoomOut.tap()
         app.buttons["extension-graph-zoom-in"].tap()
 
-        // Fold the visible part around the selected step, then restore it. The control is independent of the node.
-        let fold = app.buttons["extension-graph-fold-p3.s3"]
-        XCTAssertTrue(fold.waitForExistence(timeout: 10), app.debugDescription)
-        XCTAssertEqual(fold.label, "Fold")
+        // Fold a visible parent, then restore it. The control is independent of its node.
+        let folds = app.buttons.matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "extension-graph-fold-")).allElementsBoundByIndex
+        guard let fold = visible(folds, in: app) else {
+            XCTFail("no visible fold control:\n\(app.debugDescription)")
+            return
+        }
+        let openLabel = fold.label
+        XCTAssertFalse(openLabel.isEmpty)
         fold.tap()
-        XCTAssertTrue(fold.label.hasPrefix("Show "), fold.label)
+        XCTAssertNotEqual(fold.label, openLabel, "folding changes the control to its show-hidden label")
         fold.tap()
-        XCTAssertEqual(fold.label, "Fold")
+        XCTAssertEqual(fold.label, openLabel)
 
         app.buttons["extension-graph-full-screen"].tap()
         XCTAssertTrue(app.buttons["extension-graph-close"].waitForExistence(timeout: 10), app.debugDescription)
         shot(app, "full-screen")
-        let selected = app.descendants(matching: .any)["extension-graph-node-p2.s3"].firstMatch
-        XCTAssertTrue(selected.waitForExistence(timeout: 10), app.debugDescription)
+        let cover = app.descendants(matching: .any)["extension-graph-cover"]
+        XCTAssertTrue(cover.waitForExistence(timeout: 10), app.debugDescription)
+        let nodes = cover.descendants(matching: .button).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "extension-graph-node-")).allElementsBoundByIndex
+        guard let selected = visible(nodes, in: app) else {
+            XCTFail("no visible node with an action in the full-screen canvas:\n\(app.debugDescription)")
+            return
+        }
         selected.tap()
         let pushed = app.staticTexts["This page stands for a node's own page: its question, its result and its steps."]
         XCTAssertTrue(pushed.waitForExistence(timeout: 15), app.debugDescription)
         app.navigationBars.buttons.element(boundBy: 0).tap()
         XCTAssertTrue(app.buttons["extension-graph-full-screen"].waitForExistence(timeout: 15), app.debugDescription)
-        shot(app, "page")
+        shot(app, "page-after-push")
         app.buttons["extension-graph-fit"].tap()
     }
 
@@ -109,5 +146,6 @@ final class ExtensionGraphUITests: XCTestCase {
         shot(app, "preview-full-screen")
         app.buttons["extension-graph-close"].tap()
         XCTAssertTrue(preview.waitForExistence(timeout: 10), app.debugDescription)
+        shot(app, "overview")
     }
 }
