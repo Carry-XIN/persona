@@ -2791,6 +2791,7 @@ the same titles, states and actions are there, as a list:
 
 Below versions 6 and 3 the rows then lose what those versions did not have (`icon_color`, `icon`), as any row. A native stream's
 client (whose components never include `graph`) gets the same rows. Extensions may still draw an older app differently (`ui_version`).
+An action's `items` holding a graph are left out for an app below 10, which then draws the whole page again.
 
 **The web** (#9727): see `web/src/views/extensions/ViewBody10.tsx`.
 

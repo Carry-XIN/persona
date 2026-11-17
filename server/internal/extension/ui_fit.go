@@ -140,7 +140,9 @@ func fit(v *View, slot UISlot, uiVersion int, native bool, languages ...i18n.Lan
 
 // FitResult makes what ui.action answered something the app can use, past the view (Fit): lines and components in
 // place (UI version 5) are checked and the components fitted one by one; an older app gets neither, so it draws the
-// page again.
+// page again. Components holding a graph are checked as an app of 10 gets them, so a bad graph is refused for every
+// app alike; an app below 10 then gets no components either, since its graph is many rows that cannot stand in for
+// one component, and draws the page again, where Fit draws those rows.
 func FitResult(res *ActionResult, slot UISlot, uiVersion int, languages ...i18n.Lang) error {
 	l := i18n.Default
 	if len(languages) > 0 {
@@ -162,11 +164,19 @@ func FitResult(res *ActionResult, slot UISlot, uiVersion int, languages ...i18n.
 			return errors.New("items: each has the key of the one it stands for")
 		}
 	}
+	graphBelow10 := uiVersion < 10 && slices.ContainsFunc(res.Items, func(e UIElem) bool { return e.Type == wire.ComponentGraph })
+	if graphBelow10 {
+		uiVersion = 10
+	}
 	if _, err := Fit(&v, slot, uiVersion, l); err != nil {
 		return err
 	}
 	if len(v.Sections) == 0 || len(v.Sections[0].Items) != len(res.Items) {
 		return errors.New("items: of types this app draws")
+	}
+	if graphBelow10 {
+		res.Items = nil
+		return nil
 	}
 	res.Items = v.Sections[0].Items
 	return nil

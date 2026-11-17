@@ -417,3 +417,40 @@ func TestGraphReadingOrderFollowsTheSharedCases(t *testing.T) {
 		}
 	}
 }
+
+// An action's components in place holding a graph: an app of 10 gets the graph; an app of 5 to 9 gets no components,
+// since its graph is one row per node and cannot stand in for one component, and draws the page again (the lines
+// stay). A bad graph is refused for every app alike.
+func TestFitResultGraphBelow10(t *testing.T) {
+	page, _ := Slot("nav_page")
+	graph := func(edges ...wire.GraphEdge) ActionResult {
+		return ActionResult{
+			Lines: &FileLines{Path: "a.go", Side: "new", Start: 1, Lines: []string{"a"}},
+			Items: []UIElem{{Type: wire.ComponentGraph, Key: "work", Nodes: []wire.GraphNode{{ID: "a", Title: "A"}, {ID: "b", Title: "B"}}, Edges: edges}},
+		}
+	}
+	tree := wire.GraphEdge{From: "a", To: "b"}
+
+	res := graph(tree)
+	if err := FitResult(&res, page, 10); err != nil {
+		t.Fatalf("v10: %v", err)
+	}
+	if len(res.Items) != 1 || res.Items[0].Type != wire.ComponentGraph || len(res.Items[0].Nodes) != 2 || res.Lines == nil {
+		t.Fatalf("v10 does not keep the graph and the lines: %+v", res)
+	}
+	for _, version := range []int{9, 8, 5} {
+		res := graph(tree)
+		if err := FitResult(&res, page, version); err != nil {
+			t.Fatalf("v%d: %v", version, err)
+		}
+		if res.Items != nil || res.Lines == nil {
+			t.Errorf("v%d: items %+v, lines %v; want no items and the lines", version, res.Items, res.Lines)
+		}
+	}
+	for _, version := range []int{10, 9} {
+		res := graph(tree, wire.GraphEdge{From: "b", To: "a"})
+		if err := FitResult(&res, page, version); err == nil {
+			t.Errorf("v%d: a graph with a cycle is taken", version)
+		}
+	}
+}
