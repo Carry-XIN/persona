@@ -14,6 +14,14 @@ struct ChatExportTests {
 
     private func blocks(_ items: [Item]) -> [ChatBlock] { ChatBlock.build(ChatStore.buildRows(items)) }
 
+    private func foldedNarration() -> Item {
+        var fold = item(2, "assistant", "", kind: .fold)
+        fold.fold = Fold(items: 1, tools: 0, thoughts: 1, until: nil, throughSeq: 3, throughID: "m3",
+                         latestThinking: FoldThinking(id: "m3", seq: 3, ts: nil, role: "assistant", kind: .thinking,
+                                                      text: "Clipped narration…", fullSize: 900))
+        return fold
+    }
+
     // MARK: Include Questions
 
     @Test func aReplyBringsItsTurnsQuestionsInOrder() {
@@ -24,6 +32,33 @@ struct ChatExportTests {
         #expect(map["m3"] == ["m1", "m2"])
         #expect(map["m5"] == ["m4"])
         #expect(map["m1"] == nil, "a question brings nothing")
+    }
+
+    @Test func promotedNarrationBringsItsQuestionEvenWhenOnlyAFoldKnowsIt() {
+        var first = item(2, "assistant", "", kind: .toolUse)
+        first.toolUseID = "a"
+        first.toolName = "Read"
+        var second = item(4, "assistant", "", kind: .toolUse)
+        second.toolUseID = "b"
+        second.toolName = "Bash"
+        let rawBlocks = blocks([
+            item(1, "user", "Check the change"), first,
+            item(3, "assistant", "The check passed; reviewing it", kind: .thinking), second,
+        ])
+        #expect(PickQuestions.map(rawBlocks)["m3"] == nil, "ordinary folded narration does not consume a waiting question")
+        let raw = PickQuestions.map(rawBlocks, narration: ["m3"])
+        #expect(raw["m3"] == ["m1"], "a thought nested between calls is a visible reply")
+
+        let coldBlocks = blocks([item(1, "user", "Check the change"), foldedNarration()])
+        #expect(PickQuestions.map(coldBlocks)["m3"] == nil)
+        let cold = PickQuestions.map(coldBlocks, narration: ["m3"])
+        #expect(cold["m3"] == ["m1"], "a fold-only preview brings the question too")
+
+        let waiting = PickQuestions.map(blocks([
+            item(1, "user", "First question"), item(2, "assistant", "Folded narration", kind: .thinking),
+            item(3, "user", "Follow-up"), item(4, "assistant", "Text answer"),
+        ]))
+        #expect(waiting["m4"] == ["m1", "m3"], "hidden narration still leaves its question for the next visible reply")
     }
 
     @Test func aQuestionWithoutItsOwnReplyGoesWithTheNext() {
@@ -86,6 +121,21 @@ struct ChatExportTests {
     }
 
     // MARK: Copy
+
+    @Test func aColdFoldPreviewDraftKeepsTheWholeTextFetch() throws {
+        let items = [item(1, "user", "Check the change"), foldedNarration()]
+        let lines = ChatLines(openWork: []).build(ChatStore.rebuild(items, settled: nil).blocks, live: "m1")
+        let preview = try #require(lines.compactMap { line -> Item? in
+            guard case .row(.assistant(let item)) = line.content, item.kind == .thinking else { return nil }
+            return item
+        }.first)
+        let bar = MessageBarInfo(id: preview.id, text: preview.text ?? "", isUser: false, date: nil, pending: false)
+        let model = AppModel(stateFolder: FileManager.default.temporaryDirectory.appending(path: UUID().uuidString))
+        let draft = ChatView.forwardDraft(bar, key: SessionKey(machineID: "box", sessionID: "s"), model: model,
+                                          menu: MessageMenu(), visibleItem: preview)
+        #expect(draft.pieces.first?.raw == "Clipped narration…")
+        #expect(draft.pieces.first?.full != nil, "full_size must reach the existing fullItem fetch")
+    }
 
     @Test func copiedTextSaysWhoWroteEachWithABlankLineBetween() {
         let text = ExportText.copy([

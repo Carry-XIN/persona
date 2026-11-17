@@ -30,13 +30,31 @@ nonisolated struct ExportMessage: Identifiable, Equatable, Sendable {
 /// (two messages sent one after the other are two turns, the first without an answer). Injected lines and `/loop` ticks
 /// are not messages (`ChatRow.pickBar`), so never questions.
 enum PickQuestions {
-    /// Every reply of every turn (its answer, and the replies its steps hold) → its questions.
-    static func map(_ blocks: [ChatBlock]) -> [String: [String]] {
+    /// Every reply of every turn (its answer, and the replies its steps hold) → its questions. `narration` limits
+    /// thought replies to those promoted into visible lines; an ordinary folded thought does not consume a waiting question.
+    static func map(_ blocks: [ChatBlock], narration: Set<String> = []) -> [String: [String]] {
         var out: [String: [String]] = [:]
         var waiting: [String] = [] // asked, no reply yet: they go with the next reply
         for case .turn(let t) in blocks {
-            let replies = (t.process + [t.answer].compactMap { $0 }).compactMap { row -> String? in
-                if case .assistant(let item) = row { item.id } else { nil }
+            let replies = (t.process + [t.answer].compactMap { $0 }).flatMap { row -> [String] in
+                switch row {
+                case .assistant(let item):
+                    return [item.id]
+                case .thinking(let item):
+                    return narration.contains(item.id) ? [item.id] : []
+                case .tools(let steps):
+                    return steps.flatMap { step -> [String] in
+                        switch step {
+                        case .thought(let item): return narration.contains(item.id) ? [item.id] : []
+                        case .folded(let item):
+                            guard let preview = item.fold?.latestThinking, narration.contains(preview.id) else { return [] }
+                            return [preview.id]
+                        default: return []
+                        }
+                    }
+                default:
+                    return []
+                }
             }
             let questions = waiting + t.users.compactMap { $0.pickBar?.id }
             guard !replies.isEmpty else {

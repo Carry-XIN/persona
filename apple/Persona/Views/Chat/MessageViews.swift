@@ -598,6 +598,15 @@ struct AssistantText: View, Equatable {
     /// Like `UserBubble`: a hub push re-evaluating the page does not re-run every answer's body (Markdown is the
     /// heaviest row there is).
     nonisolated static func == (a: Self, b: Self) -> Bool { a.item == b.item && a.quiet == b.quiet }
+
+    /// A bounded narration preview can later be replaced by its original under the same item id. Version only that
+    /// cache entry by its text; ordinary answers and prewarmed work text keep the id-only key, and row identity never changes.
+    nonisolated static func memoKey(_ scope: String, item: Item, quiet: Bool) -> String {
+        let key = RowMemo.key(scope, item.id)
+        guard quiet, item.kind == .thinking, item.fullSize != nil else { return key }
+        return key + "\u{0}cut\u{0}\((item.text ?? "").hashValue)"
+    }
+
     @Environment(\.openFile) private var openFile
     @Environment(\.rowMemoScope) private var memoScope
     /// The new conversation layout (#1666, `ChatLayout`): Persona's answer in its pale gray box.
@@ -607,8 +616,8 @@ struct AssistantText: View, Equatable {
     private var boxed: Bool { layout.on && !quiet }
 
     /// The answer's words, in their box when there is one (also what a long press lifts).
-    private func answer(_ d: AssistantRowText) -> some View {
-        AssistantRichMarkdown(text: item.text ?? "", itemID: item.id, memo: d, memoKey: RowMemo.key(memoScope, item.id))
+    private func answer(_ d: AssistantRowText, key: String) -> some View {
+        AssistantRichMarkdown(text: item.text ?? "", itemID: item.id, memo: d, memoKey: key)
             // Inside the theme (applied first), or the theme's text style wins (docs/lessons/ios.md).
             .modifier(QuietMarkdown(on: quiet))
             .markdownTheme(.persona)
@@ -623,9 +632,10 @@ struct AssistantText: View, Equatable {
         #if DEBUG || PERF_SIGNPOST
         let _ = PerfTrace.body("AssistantText")
         #endif
-        let d = RowMemo.assistant(RowMemo.key(memoScope, item.id)) { _ in AssistantRowText(item.text ?? "") } // once per message
+        let key = Self.memoKey(memoScope, item: item, quiet: quiet)
+        let d = RowMemo.assistant(key) { _ in AssistantRowText(item.text ?? "") } // once per message
         VStack(alignment: .leading, spacing: Theme.Space.sm) {
-            answer(d)
+            answer(d, key: key)
                 .task(id: item.id) { await Self.preloadLinks(item) }
                 #if os(macOS)
                 // Drag to select and ⌘C, as on the web (#2542); iOS keeps the long-press menu's Select.
@@ -633,7 +643,7 @@ struct AssistantText: View, Equatable {
                 #endif
                 .contentShape(.rect)
                 // A boxed answer is lifted in its own box, a bare one on a card.
-                .messageLongPress(id: item.id, card: !boxed) { answer(d) }
+                .messageLongPress(id: item.id, card: !boxed) { answer(d, key: key) }
             if let openFile {
                 // Documents as cards with their first page (#1543), the rest as chips.
                 FileChips(paths: d.chips, open: openFile)

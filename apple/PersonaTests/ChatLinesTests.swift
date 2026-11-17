@@ -12,6 +12,44 @@ struct ChatLinesTests {
 
     private func blocks(_ items: [Item]) -> [ChatBlock] { ChatStore.rebuild(items, settled: nil).blocks }
 
+    /// Narration promoted out of the work summary. Its original kind remains `thinking`; a final answer is `text`.
+    private func narration(_ lines: [ChatLine]) -> [ChatLine] {
+        lines.filter { line in
+            guard case .row(.assistant(let item)) = line.content else { return false }
+            return item.kind == .thinking
+        }
+    }
+
+    private func workItemIDs(_ lines: [ChatLine]) -> [String] {
+        lines.flatMap { line -> [String] in
+            guard case .work(_, let items, _, _, _) = line.content else { return [] }
+            return items.map(\.id)
+        }
+    }
+
+    private func midTurn(_ seq: Int, _ text: String) -> Item {
+        var message = item(seq, .text, role: "user", text: text)
+        message.queued = true // Claude Code's attachment/queued_command, absorbed_mid_turn.
+        return message
+    }
+
+    private func foldedNarration() throws -> Item {
+        let wire = #"""
+        {
+          "id": "fold:2", "seq": 2, "role": "assistant", "kind": "fold",
+          "fold": {
+            "items": 4, "tools": 2, "thoughts": 1,
+            "through_seq": 5, "through_id": "5#0",
+            "latest_thinking": {
+              "id": "3#0", "seq": 3, "role": "assistant", "kind": "thinking",
+              "text": "The folded checks are green; reviewing the diff", "full_size": 900
+            }
+          }
+        }
+        """#
+        return try JSONDecoder().decode(Item.self, from: Data(wire.utf8))
+    }
+
     /// Each line's kind, short: user / answer / work / step / end / run / error.
     private func kinds(_ lines: [ChatLine]) -> [String] {
         lines.map { line in
@@ -254,6 +292,149 @@ struct ChatLinesTests {
         #expect(kinds(open) == ["user", "work", "step", "step", "step", "step", "end", "answer"])
         #expect(open.contains { if case .workStep(_, .text(let i), _) = $0.content { i.text == "First narration" } else { false } })
         #expect(open.contains { if case .workStep(_, .text(let i), _) = $0.content { i.text == "Latest narration" } else { false } })
+    }
+
+    /// #1323 A: Claude Code 2.1.3xx writes narration between tool calls as thinking. The newest non-empty one stays
+    /// after the live work line, later calls do not change its row id, and opening the work does not draw it twice.
+    @Test func aRunningTurnKeepsItsNewestNarrationAfterTheWorkLine() {
+        let first = [item(1, .text, role: "user", text: "Check the synthetic change"),
+                     item(2, .thinking, text: "Reading the implementation"),
+                     item(3, .toolUse, tool: "Read", id: "a"),
+                     item(4, .thinking, text: "The fix is ready; checking it now"),
+                     item(5, .toolUse, tool: "Bash", id: "b")]
+        let initial = ChatLines(openWork: []).build(blocks(first), live: "1#0")
+        #expect(kinds(initial) == ["user", "work", "answer"])
+        #expect(narration(initial).map(\.id) == ["4#0"])
+        #expect(!workItemIDs(initial).contains("4#0"))
+
+        let withLaterCall = first + [item(6, .toolResult, role: "user", text: "ok", id: "b"),
+                                     item(7, .toolUse, tool: "Grep", id: "c")]
+        let later = ChatLines(openWork: []).build(blocks(withLaterCall), live: "1#0")
+        #expect(narration(later).map(\.id) == narration(initial).map(\.id), "a later tool call keeps the narration row's identity")
+
+        let replaced = ChatLines(openWork: []).build(blocks(withLaterCall + [
+            item(8, .thinking, text: "All checks passed; reviewing the result"),
+            item(9, .thinking, text: "  \n"), // Empty narration never replaces a visible one.
+        ]), live: "1#0")
+        #expect(narration(replaced).map(\.id) == ["8#0"])
+        #expect(!narration(replaced).contains { $0.holds("2#0") || $0.holds("4#0") })
+        #expect(!workItemIDs(replaced).contains("8#0"))
+
+        let open = ChatLines(openWork: ["w-1#0"]).build(blocks(withLaterCall), live: "1#0")
+        #expect(narration(open).map(\.id) == ["4#0"])
+        #expect(!open.contains { $0.id == "w-1#0/4#0" }, "the promoted thought is not also an opened work step")
+        #expect(narration(ChatLines(openWork: []).build(blocks(withLaterCall), live: "1#0", streaming: true)).isEmpty,
+                "the next streaming text replaces the previous segment without leaving a second line")
+    }
+
+    /// #1323 B: current main has no wake chip: the wake opens its own exchange (#9140). Its notice and folded work
+    /// remain above the live narration just as they do above a final answer.
+    @Test func aRunningWokenTurnShowsNarrationAfterItsWorkLine() {
+        var wake = item(2, .notice, role: "system", text: "Background task done")
+        wake.wake = true
+        let items = [wake, item(3, .toolUse, tool: "Bash", id: "wake-check"),
+                     item(4, .thinking, text: "The background check is healthy"),
+                     item(5, .toolUse, tool: "Read", id: "wake-review")]
+        let lines = ChatLines(openWork: []).build(blocks(items), live: wake.id)
+        #expect(kinds(lines) == ["row", "work", "answer"])
+        #expect(lines.map(\.id) == ["2#0", "w-2#0", "4#0"])
+        #expect(narration(lines).map(\.id) == ["4#0"])
+        #expect(!workItemIDs(lines).contains("4#0"))
+    }
+
+    /// #1323 C: a cold folded page carries only the fold's bounded latest_thinking preview, not the original thought.
+    @Test func aRunningTurnShowsNarrationKnownOnlyFromAFold() throws {
+        let fold = try foldedNarration()
+        let cached = try JSONDecoder().decode(Item.self, from: JSONEncoder().encode(fold))
+        #expect(cached.fold?.latestThinking?.id == "3#0")
+        #expect(cached.fold?.latestThinking?.fullSize == 900)
+        let items = [item(1, .text, role: "user", text: "Check the synthetic change"), fold]
+        let b = blocks(items)
+        let closed = ChatLines(openWork: []).build(b, live: "1#0")
+        #expect(kinds(closed) == ["user", "work", "answer"])
+        #expect(closed.map(\.id) == ["1#0", "w-1#0", "3#0"])
+        #expect(narration(closed).map(\.id) == ["3#0"])
+        #expect(workItemIDs(closed) == ["fold:2"], "the preview does not unfold or replace the fold")
+
+        let open = ChatLines(openWork: ["w-1#0"]).build(b, live: "1#0")
+        #expect(narration(open).map(\.id) == ["3#0"])
+        #expect(open.filter { $0.id == "w-1#0/fold:2" }.count == 1)
+    }
+
+    /// A cold fold preview has no standalone transcript item. Select Messages must still resolve it for Copy, Forward
+    /// and Export Image instead of silently dropping the only picked message.
+    @Test func aColdFoldPreviewSurvivesMessageSelection() throws {
+        let items = [item(1, .text, role: "user", text: "Check the synthetic change"), try foldedNarration()]
+        let lines = ChatLines(openWork: []).build(blocks(items), live: "1#0")
+        let shown = lines.compactMap { line -> MessageBarInfo? in
+            guard case .row(let row) = line.content else { return nil }
+            return row.pickBar
+        }
+        let picked = MessagePick.pickedBars(ids: ["3#0"], shown: shown)
+        #expect(picked.map(\.id) == ["3#0"])
+        #expect(picked.first?.text == "The folded checks are green; reviewing the diff")
+    }
+
+    /// #1323 D: an absorbed mid-turn message has its own exchange. While the turn continues, narration after that
+    /// message is its visible reply even when another tool call follows the narration.
+    @Test func aMidTurnMessageHasAVisibleNarrationReplyWhileRunning() {
+        let items = [item(1, .text, role: "user", text: "Start the checks"),
+                     item(2, .toolUse, tool: "Bash", id: "a"),
+                     item(3, .toolResult, role: "user", text: "ok", id: "a"),
+                     midTurn(4, "What did the first check find?"),
+                     item(5, .thinking, text: "The first check passed; the second is running"),
+                     item(6, .toolUse, tool: "Bash", id: "b"),
+                     item(7, .toolResult, role: "user", text: "ok", id: "b")]
+        let lines = ChatLines(openWork: []).build(blocks(items), live: "1#0")
+        #expect(lines.map(\.id) == ["1#0", "w-1#0", "4#0", "w-4#0", "5#0"])
+        #expect(narration(lines).map(\.id) == ["5#0"])
+        #expect(!workItemIDs(lines).contains("5#0"))
+    }
+
+    /// #1323 E: completion does not fold away a mid-turn message's narration-only reply. An earlier exchange may have
+    /// its own final text, or the whole turn may have no text answer; neither changes that reply.
+    @Test(arguments: [false, true]) func aMidTurnMessagesNarrationReplySurvivesCompletion(withEarlierAnswer: Bool) {
+        var items = [item(1, .text, role: "user", text: "Start the checks"),
+                     item(2, .toolUse, tool: "Bash", id: "a"),
+                     item(3, .toolResult, role: "user", text: "ok", id: "a")]
+        if withEarlierAnswer { items.append(item(4, .text, text: "The first check passed")) }
+        let messageSeq = withEarlierAnswer ? 5 : 4
+        let thoughtSeq = messageSeq + 1
+        items += [midTurn(messageSeq, "And the second?"),
+                  item(thoughtSeq, .thinking, text: "The second check passed too"),
+                  item(thoughtSeq + 1, .toolUse, tool: "Bash", id: "b"),
+                  item(thoughtSeq + 2, .toolResult, role: "user", text: "ok", id: "b")]
+        let b = blocks(items)
+        let lines = ChatLines(openWork: []).build(b, live: nil)
+        var expected = ["1#0", "w-1#0"]
+        if withEarlierAnswer { expected.append("4#0") }
+        expected += ["\(messageSeq)#0", "w-\(messageSeq)#0", "\(thoughtSeq)#0"]
+        #expect(lines.map(\.id) == expected)
+        #expect(narration(lines).map(\.id) == ["\(thoughtSeq)#0"])
+        #expect(!workItemIDs(lines).contains("\(thoughtSeq)#0"))
+
+        let open = ChatLines(openWork: ["w-\(messageSeq)#0"]).build(b, live: nil)
+        #expect(narration(open).map(\.id) == ["\(thoughtSeq)#0"])
+        #expect(!open.contains { $0.id == "w-\(messageSeq)#0/\(thoughtSeq)#0" })
+    }
+
+    /// #1323 F: an ordinary finished exchange keeps its narration folded, including one that never produced a text
+    /// answer. Only a mid-turn message's narration-only reply is retained after completion.
+    @Test(arguments: [false, true]) func anOrdinaryFinishedTurnKeepsNarrationFolded(hasFinalAnswer: Bool) {
+        var items = [item(1, .text, role: "user", text: "Check the synthetic change"),
+                     item(2, .thinking, text: "Intermediate narration"),
+                     item(3, .toolUse, tool: "Read", id: "a"),
+                     item(4, .toolResult, role: "user", text: "ok", id: "a")]
+        if hasFinalAnswer { items.append(item(5, .text, text: "Final answer")) }
+        let b = blocks(items)
+        let closed = ChatLines(openWork: []).build(b, live: nil)
+        #expect(narration(closed).isEmpty)
+        #expect(kinds(closed) == (hasFinalAnswer ? ["user", "work", "answer"] : ["user", "work"]))
+        #expect(workItemIDs(closed).contains("2#0"))
+
+        let open = ChatLines(openWork: ["w-1#0"]).build(b, live: nil)
+        #expect(narration(open).isEmpty)
+        #expect(open.filter { $0.id == "w-1#0/2#0" }.count == 1)
     }
 
     @Test func theRunningTurnShowsEachMessage() {

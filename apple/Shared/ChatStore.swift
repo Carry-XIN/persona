@@ -50,7 +50,7 @@ nonisolated enum ChatRow: Identifiable, Hashable, Sendable {
     /// An answer or a notice that may be a model API error (`APIErrorInfo` decides).
     var errorCandidate: Item? {
         switch self {
-        case .assistant(let i), .notice(let i): i
+        case .assistant(let i) where i.kind == .text, .notice(let i): i
         default: nil
         }
     }
@@ -1534,8 +1534,9 @@ nonisolated enum ChatCache {
     /// v18: Codex commentary is assistant text rather than thinking; older cached items would keep hiding mid-turn answers.
     /// v19: Paseo's input to an agent is another session's message, a subagent's task note or a notice (#8220); v18's
     /// copies would keep the raw <paseo-system> envelopes as the user's bubbles.
+    /// v20: folds carry their bounded `latest_thinking` preview; older copies would hide it on a cold running chat.
     /// Bump it whenever the item structure or the text the hub gives an item changes.
-    static let folder = "chats-v19"
+    static let folder = "chats-v20"
 
     /// Once per launch, before the first copy is read or written (a static let runs once, on whichever thread asks first).
     private static let dropOlder: Void = {

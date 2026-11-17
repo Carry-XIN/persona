@@ -42,6 +42,13 @@ import SwiftUI
     /// The messages that go: the picked ones and the questions they bring.
     var going: Set<String> { ids.union(brought) }
 
+    /// Resolves picks from the visible lines, not only full transcript items: a cold fold's narration preview is a
+    /// visible message without its own item. Long answers have several lines but go once.
+    static func pickedBars(ids: Set<String>, shown: [MessageBarInfo]) -> [MessageBarInfo] {
+        var added: Set<String> = []
+        return shown.filter { ids.contains($0.id) && added.insert($0.id).inserted }
+    }
+
     /// Picks or unpicks `id`; false when more would go than one forward takes.
     func toggle(_ id: String) -> Bool {
         questions = readQuestions()

@@ -4953,7 +4953,8 @@ struct ChatView: View {
         // Forward (#3807): the pressed message as a forward, to the picker.
         menu.forward = { [model, key, weak menu = menu] bar in
             guard let menu else { return }
-            var draft = Self.forwardDraft(bar, key: key, model: model, menu: menu)
+            var draft = Self.forwardDraft(bar, key: key, model: model, menu: menu,
+                                          visibleItem: Self.promotedNarrations(currentLines())[bar.id])
             draft.selects = true
             menu.forwarding = draft
         }
@@ -4964,15 +4965,19 @@ struct ChatView: View {
             withAnimation(Theme.Motion.standard) { pick.start(id) }
         }
         menu.selectable = { id in currentLines().contains { Self.pickBar($0)?.id == id } }
-        pick.readQuestions = { [model, key] in PickQuestions.map(model.chat(key).blocks) }
+        pick.readQuestions = { [model, key] in
+            let narration = Set(Self.promotedNarrations(currentLines()).keys)
+            return PickQuestions.map(model.chat(key).blocks, narration: narration)
+        }
         #endif
     }
 
     /// The pressed message as a forward: who wrote it and where, its text as this chat holds it (the whole of it read
     /// when it goes, if cut), your own message's pictures, and the same message as a share card.
-    static func forwardDraft(_ bar: MessageBarInfo, key: SessionKey, model: AppModel, menu: MessageMenu) -> ForwardDraft {
+    static func forwardDraft(_ bar: MessageBarInfo, key: SessionKey, model: AppModel, menu: MessageMenu,
+                             visibleItem: Item? = nil) -> ForwardDraft {
         let s = model.session(key)
-        let item = model.chat(key).items.first { $0.id == bar.id }
+        let item = visibleItem ?? model.chat(key).items.first { $0.id == bar.id }
         let role: ForwardMessage.Role = bar.isUser ? .user : bar.from != nil ? .other : s?.assistant == true ? .persona : .agent
         let author = bar.from ?? (role == .persona ? "Persona" : s?.agentLabel ?? "Claude")
         let project = s?.assistant == true ? nil : [s?.spaceName, s?.slotLabel].compactMap { $0 }.joined(separator: " › ")
@@ -5028,6 +5033,16 @@ struct ChatView: View {
     }
 
     #if os(iOS)
+    /// Promoted narration is a visible item even when a cold fold has no standalone transcript item for it. Passing
+    /// that item to a forward keeps the existing whole-text fetch when its preview is clipped.
+    private static func promotedNarrations(_ lines: [ChatLine]) -> [String: Item] {
+        let items = lines.compactMap { line -> Item? in
+            guard case .row(.assistant(let item)) = line.content, item.kind == .thinking else { return nil }
+            return item
+        }
+        return Dictionary(items.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+    }
+
     /// The message a line stands for while selecting (#3838); nil for lines that are not messages. A long answer's parts
     /// (#4970) are each a line of the one answer.
     private static func pickBar(_ line: ChatLine) -> MessageBarInfo? {
@@ -5063,9 +5078,10 @@ struct ChatView: View {
     /// The picked messages as forwards, in the chat's order; with `questions`, with the questions they bring (#9468).
     private func pickedDrafts(questions: Bool) -> [ForwardDraft] {
         let ids = questions ? pick.ids.union(PickQuestions.brought(pick.ids, questions: pick.questions)) : pick.ids
-        let shown = Dictionary(currentLines().compactMap { Self.pickBar($0) }.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-        return model.chat(key).items.compactMap { ids.contains($0.id) ? shown[$0.id] : nil }
-            .map { Self.forwardDraft($0, key: key, model: model, menu: menu) }
+        let shown = currentLines().compactMap { Self.pickBar($0) }
+        let previews = Self.promotedNarrations(currentLines())
+        return MessagePick.pickedBars(ids: ids, shown: shown)
+            .map { Self.forwardDraft($0, key: key, model: model, menu: menu, visibleItem: previews[$0.id]) }
     }
 
     /// Forward: the picked messages (and their questions, with Include Questions) to Forward To. Selecting ends once a
@@ -5205,8 +5221,8 @@ struct ChatView: View {
         case .user(let i): userRow(i, showsSource: showsSource, hidesPrompt: hidesPrompt).chatMark("chat.user." + i.id)
         case .assistant(let i):
             VStack(alignment: .leading, spacing: 0) {
-                AssistantText(item: i).equatable().chatMark("chat.answer." + i.id)
-                ReplyUsageFooter(item: i)
+                AssistantText(item: i, quiet: i.kind == .thinking).equatable().chatMark("chat.answer." + i.id)
+                if i.kind == .text { ReplyUsageFooter(item: i) }
             }
         case .thinking(let i):
             if style == .dev && live { ThinkingRow(item: i) }

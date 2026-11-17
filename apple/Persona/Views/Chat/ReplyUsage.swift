@@ -159,7 +159,7 @@ enum ReplyUsageText {
         lines.map { line in
             switch line.content {
             case .row(.user): ReplyTiming(isUser: true)
-            case .row(.assistant(let item)): ReplyTiming(replyID: item.id)
+            case .row(.assistant(let item)) where item.kind == .text: ReplyTiming(replyID: item.id)
             case .answerPart(let item, _, let index, let count) where index == count - 1: ReplyTiming(replyID: item.id)
             case .work(_, _, let live, let start, let end): ReplyTiming(live: live, workStart: start, workEnd: end)
             default: ReplyTiming()

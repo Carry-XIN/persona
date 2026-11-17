@@ -53,6 +53,35 @@ struct RowMemoTests {
         #expect(ToolTextMemo.input(call, scope: RowMemo.scope(a)).contains("echo A"))
     }
 
+    @Test func aClippedQuietPreviewDoesNotPoisonTheFullNarrationMemo() {
+        var preview = Self.text("384#0", "Clipped narration…")
+        preview.role = "assistant"
+        preview.kind = .thinking
+        preview.fullSize = 900
+        var original = preview
+        original.text = "The complete narration replaces the preview"
+        let scope = RowMemo.scope(SessionKey(machineID: "m-\(UInt64.random(in: 1...UInt64.max))", sessionID: "preview"))
+        let previewKey = AssistantText.memoKey(scope, item: preview, quiet: true)
+        let originalKey = AssistantText.memoKey(scope, item: original, quiet: true)
+        #expect(previewKey != originalKey, "the original can remain page-clipped and still must replace the preview")
+        #expect(AssistantText.memoKey(scope, item: preview, quiet: false) == RowMemo.key(scope, preview.id),
+                "ordinary answers keep their existing cache key")
+        var workText = preview
+        workText.kind = .text
+        #expect(AssistantText.memoKey(scope, item: workText, quiet: true) == RowMemo.key(scope, workText.id),
+                "clipped work text keeps the base key filled by RowMemo.prewarm")
+        var whole = original
+        whole.fullSize = nil
+        #expect(AssistantText.memoKey(scope, item: whole, quiet: true) == RowMemo.key(scope, whole.id),
+                "a whole original uses the untouched base key, not the preview's entry")
+
+        var parsed = 0
+        _ = RowMemo.assistant(previewKey) { _ in parsed += 1; return AssistantRowText(preview.text ?? "") }
+        _ = RowMemo.assistant(originalKey) { _ in parsed += 1; return AssistantRowText(original.text ?? "") }
+        _ = RowMemo.assistant(previewKey) { _ in parsed += 1; return AssistantRowText("not used") }
+        #expect(parsed == 2, "preview and original parse once each, never one through the other's entry")
+    }
+
     @Test func keysOutsideAChatAreTheIDAsBefore() {
         #expect(MemoScope.key("", "384#0") == "384#0")
         #expect(MemoScope.key(MemoScope.of(machine: "m", session: "s1"), "384#0") != MemoScope.key(MemoScope.of(machine: "m", session: "s2"), "384#0"))

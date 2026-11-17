@@ -2336,11 +2336,31 @@ nonisolated struct Fold: Codable, Hashable, Sendable {
     var supervisionUser: Bool? = nil
     /// What the folded items used (#5426). Omitted when none of them carried usage, and from older nodes.
     var usage: [TokenUsage]? = nil
+    /// A bounded copy of the newest non-empty narration hidden by this fold. Its original stays in the fold's range.
+    var latestThinking: FoldThinking? = nil
 
     enum CodingKeys: String, CodingKey {
         case items, tools, thoughts, until, images, tasks, usage
         case supervisionUser = "supervision_user"
         case throughSeq = "through_seq", throughID = "through_id"
+        case latestThinking = "latest_thinking"
+    }
+}
+
+/// The narration preview a fold carries (`fold.latest_thinking`). The hub limits this copy to these fields; keeping a
+/// separate type also avoids a recursive `Fold` / `Item` value while the original item remains inside the fold's range.
+nonisolated struct FoldThinking: Codable, Hashable, Sendable {
+    var id: String
+    var seq: Int
+    var ts: Date?
+    var role: String
+    var kind: ItemKind
+    var text: String?
+    var fullSize: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case id, seq, ts, role, kind, text
+        case fullSize = "full_size"
     }
 }
 

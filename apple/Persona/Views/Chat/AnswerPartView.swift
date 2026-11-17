@@ -48,6 +48,10 @@ extension ChatLines {
                 out?.append(line)
                 continue
             }
+            guard item.kind == .text else {
+                out?.append(line)
+                continue
+            }
             let parts = AnswerPartMemo.parts(item.text ?? "")
             guard parts.count > 1 else {
                 out?.append(line)

@@ -40,6 +40,8 @@ struct ChatLines {
     static func hidingCloseout(_ lines: [ChatLine]) -> [ChatLine] {
         for index in lines.indices.reversed() {
             switch lines[index].content {
+            case .row(.assistant(let item)) where item.kind == .thinking:
+                continue // promoted narration is not the turn's final answer
             case .row(.assistant(let item)):
                 guard let text = item.text, Closeout.holdsBlock(text) else { return lines }
                 let stripped = Closeout.strip(text)
@@ -305,21 +307,47 @@ struct ChatLines {
                     let photos = Self.photos(seg.rows)
                     if !photos.isEmpty { out.append(.userImages(id: "img-" + photos[0].id, items: photos)) }
                     if let u = seg.user { out.append(.row(u)) }
-                    let last = live && streaming ? nil : seg.rows.lastIndex { if case .assistant = $0 { true } else { false } }
+                    let answer = live && streaming ? nil : seg.rows.lastIndex { if case .assistant = $0 { true } else { false } }
+                    let queuedReply = seg.user?.userInput?.queued == true
+                    // Claude Code stores its narration between calls as thinking. While running, the newest output —
+                    // text or narration — owns the one visible reply slot. After completion, only an absorbed mid-turn
+                    // message with no text answer retains its narration; an ordinary finished exchange keeps it folded.
+                    let thought = (live && !streaming) || (!live && answer == nil && queuedReply)
+                        ? Self.latestNarration(seg.rows) : nil
+                    let showsThought: Bool
+                    if let thought {
+                        showsThought = live ? answer.map { thought.row > $0 } ?? true : queuedReply
+                    } else {
+                        showsThought = false
+                    }
+                    let visibleRow = showsThought ? thought?.row : answer
+                    let standaloneThought = showsThought && thought.map({ candidate in
+                        if case .thinking = seg.rows[candidate.row] { return true }
+                        return false
+                    }) == true
+                    let excludedRow = showsThought ? (standaloneThought ? thought?.row : nil) : answer
                     // Only an idle compaction with no later work belongs after the answer. A running turn's
                     // latest narration is not its final answer, and tools can follow it before compaction.
-                    let idleCompaction = !live && last.map { index in
+                    let idleCompaction = !live && visibleRow.map { index in
                         seg.rows.dropFirst(index + 1).allSatisfy { row in
                             if case .notice(let item) = row { return item.compact != nil }
                             return false
                         }
                     } == true
                     let after = Set(seg.rows.indices.filter { n in
-                        guard idleCompaction, let l = last, n > l, case .notice(let i) = seg.rows[n] else { return false }
+                        guard idleCompaction, let l = visibleRow, n > l, case .notice(let i) = seg.rows[n] else { return false }
                         return i.compact != nil
                     })
-                    let work = seg.rows.enumerated().filter { $0.offset != last && !after.contains($0.offset) }.map(\.element)
-                    let items = Self.workItems(work)
+                    let work = seg.rows.enumerated().filter { $0.offset != excludedRow && !after.contains($0.offset) }.map(\.element)
+                    var items = Self.workItems(work)
+                    if showsThought, let id = thought?.item.id {
+                        // A thought between two calls shares their ChatRow. Remove only that promoted step, not the
+                        // calls around it; a fold's bounded preview never removes or replaces the fold itself.
+                        items.removeAll { work in
+                            guard case .step(.thought(let item)) = work else { return false }
+                            return item.id == id
+                        }
+                    }
                     if !live, !items.isEmpty, items.allSatisfy(Self.isCompaction) {
                         // Only compactions (/compact): dividers across the chat, no work line to open.
                         out += work.filter { if case .notice(let i) = $0 { i.compact != nil } else { false } }.map { .row($0) }
@@ -335,7 +363,11 @@ struct ChatLines {
                     // Between the work and the answer: what the work looked at. Its id stays as pictures come in and
                     // the answer changes, so the strip grows sideways in place.
                     out += Self.viewed("vi-" + (seg.user?.id ?? opening ?? seg.rows.first?.id ?? t.id), items)
-                    if let last { out.append(.row(seg.rows[last])) }
+                    if showsThought, let thought {
+                        out.append(.row(.assistant(thought.item)))
+                    } else if let answer {
+                        out.append(.row(seg.rows[answer]))
+                    }
                     out += after.sorted().map { .row(seg.rows[$0]) }
                 }
                 out += t.trailing.map { .row($0) }
@@ -613,6 +645,38 @@ struct ChatLines {
     static func isCompaction(_ w: WorkItem) -> Bool {
         if case .step(.thought(let i)) = w, i.compact != nil { return true }
         return false
+    }
+
+    /// The newest non-empty narration in these rows, including a bounded preview known only through a fold. The row
+    /// index keeps text and narration in transcript order; later calls do not change the narration item's own id.
+    private static func latestNarration(_ rows: [ChatRow]) -> (row: Int, item: Item)? {
+        func hasWords(_ text: String?) -> Bool {
+            !(text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        for (index, row) in rows.enumerated().reversed() {
+            switch row {
+            case .thinking(let item) where hasWords(item.text):
+                return (index, item)
+            case .tools(let steps):
+                for step in steps.reversed() {
+                    switch step {
+                    case .thought(let item) where hasWords(item.text):
+                        return (index, item)
+                    case .folded(let folded):
+                        guard let preview = folded.fold?.latestThinking, hasWords(preview.text) else { continue }
+                        let item = Item(id: preview.id, seq: preview.seq, ts: preview.ts, role: preview.role,
+                                        kind: preview.kind, text: preview.text, toolUseID: nil, toolName: nil,
+                                        toolInput: nil, isError: nil, fullSize: preview.fullSize, image: nil)
+                        return (index, item)
+                    default:
+                        continue
+                    }
+                }
+            default:
+                continue
+            }
+        }
+        return nil
     }
 
     /// What a work line folds from these rows: tools, thoughts, notices and the agent's words.
