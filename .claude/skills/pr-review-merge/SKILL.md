@@ -12,8 +12,8 @@ This skill is for maintainers working with GitHub pull requests, not for Persona
 ## Read first
 
 Read `docs/operations/pr-review-automation.md` before running or changing anything. Its contract is authoritative:
-independent semantic review, verification on the exact base/head, at most three repair rounds, a fresh review after
-every new head, privacy checks and exact-head squash merging. Read `docs/operations/collaboration.md` when publishing
+independent semantic review, verification on the exact base/head, at most three repair rounds across a PR's successive
+heads, a fresh review after every new head, privacy checks and exact-head squash merging. Read `docs/operations/collaboration.md` when publishing
 comments, continuation PRs or issue updates.
 
 ## Choose the requested mode
@@ -122,8 +122,9 @@ Only use this section after explicit maintainer authorization for automatic repa
 5. The watcher may update an authorized same-repository branch through normal commits. It must never force-push or
    write a fork branch; a fork receives a continuation PR instead. Do not broaden this permission to deployments,
    releases, direct main pushes or unrelated PRs.
-6. Stop after three unsuccessful repair rounds or when the head/base moves unexpectedly. Publish the precise failure
-   through the existing workflow and leave further repair to a new maintainer decision; do not manufacture extra rounds.
+6. Stop after three unsuccessful repair rounds across the PR's successive heads or when its base moves unexpectedly.
+   A new base always invalidates the previous evidence and requires a fresh review. Publish the precise failure through
+   the existing workflow and leave further repair to a new maintainer decision; do not manufacture extra rounds.
 7. After the command, read back the PR and continuation, if any:
 
 ```bash
