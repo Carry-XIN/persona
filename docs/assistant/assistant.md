@@ -491,7 +491,9 @@ merges such a message into the turn with `turn/steer` ("Codex" below); a Claude 
   `assistant.interject_background`), **off by default**. The manager adds `interject_background: true` to `assistant.send` and to the
   `session.send` parameters it fills in (`SendParams`) while it is on. It decides for rounds the owner started.
 - **A round the owner did not start is always preempted** (#4926, `assistant/owner_preempt.go`). The default in one sentence:
-  Persona answers you first when you write into a round you did not start. The owner's own message (typed in an app, sent through a
+  Persona answers you first when you write into a round you did not start. On a round of the background supervisor
+  ([unified-entry.md](unified-entry.md) "Each round starts clean"), your message first waits for the round's turn to end, up to
+  30 seconds, so it goes in with every tool; only past that is the running command moved to the background. The owner's own message (typed in an app, sent through a
   channel, or a view action's) carries `interject_background: true` whatever the switch says while the conversation is on a round
   started by a supervision message, a scheduled task or follow-up, another conversation's message (`conversation_send` /
   `conversation_new`) or a task's notice. Persona continuing the owner's own work (a usage-limit reset, a wake for what it waits on)
