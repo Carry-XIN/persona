@@ -4,7 +4,7 @@
 // Fit, and a Full screen overlay with the same canvas. A chunk of its own, loaded with the first view that has a
 // graph (ViewBody.tsx), never the first screen or the idle preload. The layout is lib/graph-layout.ts, the shared
 // rules in slots; this file only multiplies by the web's node pitch and draws.
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { t } from "../../i18n";
 import { layOutGraph } from "../../lib/graph-layout";
@@ -14,13 +14,12 @@ import { useCloseOnBack } from "../../lib/back-close";
 import { cx, EASE, IconButton } from "../../ui/atoms";
 import { Icon } from "../../ui/icons";
 import { useEscapeClose, useModalFocus } from "../../ui/overlay";
-import { NARROW, useMedia } from "../../ui/media-query";
 import { Badge, gaugePercent, glyphOf } from "./ViewBody6";
 import { ROW_ICON } from "./ViewBody";
 
-// The web's node pitch: a node is the graph node token's size (about 224 × 64 at the default text size,
-// docs/design/DESIGN_SYSTEM.md, the graph of "UI version 10" in docs/extensions/extensions.md); a slot is a node
-// and its gap on each axis.
+// The web's node pitch, at the standard text size; the whole of it follows the page's text-size choice
+// (--text-scale, small 12/13 and large 14/13, styles.css), as every font does — the graph's node is a size of the
+// design system (docs/design/DESIGN_SYSTEM.md, the graph of "UI version 10"), so it grows with the text.
 const NODE_W = 224;
 const NODE_H = 64;
 const PITCH_X = 272;
@@ -32,7 +31,10 @@ const INSET = 40;
 // A group's frame reaches this far above its members (its title) and around them.
 const FRAME_PAD = 12;
 const CAPTION = 28;
+// 0.25 pans and zooms; a compact card's still fitted preview has no floor above this (a big graph fits 200 px;
+// iOS calls it graphPreviewMinScale 0.01).
 const MIN_ZOOM = 0.25;
+const MIN_STILL_ZOOM = 0.01;
 const MAX_ZOOM = 2;
 const STEP = 1.25;
 
@@ -47,14 +49,16 @@ interface CanvasView { x: number; y: number; zoom: number }
 /** What a `key` keeps across redraws (docs: the person's pan, zoom and folding; a re-fit only while untouched). */
 interface GraphStore { view: CanvasView; moved: boolean; folds: Set<string> | null }
 
-/** Every canvas's persistence, by the graph's `key` ("" for one without). */
+/** Every canvas's persistence, by its owner and its `key`: one entry per owner, so two extensions using the same key
+ *  never share what it keeps. */
 const STORES = new Map<string, GraphStore>();
-const storeFor = (key: string): GraphStore => {
-  let s = STORES.get(key);
-  if (!s) STORES.set(key, (s = { view: { x: 0, y: 0, zoom: 1 }, moved: false, folds: null }));
+const storeFor = (scope: string, key: string): GraphStore => {
+  const id = `${scope}\u0000${key}`;
+  let s = STORES.get(id);
+  if (!s) STORES.set(id, (s = { view: { x: 0, y: 0, zoom: 1 }, moved: false, folds: null }));
   return s;
 };
-/** Forgets what every `key` kept (a test's clean slate; the page never calls it). */
+/** Forgets what every key kept (a test's clean slate; the page never calls it). */
 export const forgetGraphStores = () => STORES.clear();
 
 const KEY_PAN: Readonly<Record<string, [number, number]>> = {
@@ -68,24 +72,188 @@ function nodeLabel(n: UIGraphNode, parentTitle: string | undefined): string {
   return parts.join(t("extensions-viewbody.read_sep"));
 }
 
+/** The page's text-size choice (ui/look.ts) as a number the canvas multiplies its pitch by; 1 at "Standard". */
+function textScaleNow(): number {
+  if (typeof window === "undefined") return 1;
+  const n = Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--text-scale"));
+  return Number.isFinite(n) && n > 0 ? n : 1;
+}
+
+// What one node drew the last time this layer drew it (its fields as they read): a node that is new, or whose fields
+// changed since, fades in; one that only moved place does not. The memory lives on the layer element itself, so a
+// canvas keeps its own and unmounting takes it with it.
+const drawMemory = new WeakMap<HTMLDivElement, Map<string, string>>();
+const drawSig = (n: UIGraphNode, parentTitle: string | undefined): string =>
+  JSON.stringify([n.title, n.badge?.text ?? "", n.subtitle ?? "", n.progress ?? null, n.tone ?? "", n.color ?? "", n.icon ?? "", n.group ?? "", n.action?.id ?? "", parentTitle ?? ""]);
+const fadesIn = (pane: HTMLDivElement, id: string, sig: string): boolean => {
+  let mem = drawMemory.get(pane);
+  if (!mem) drawMemory.set(pane, (mem = new Map()));
+  const was = mem.get(id);
+  mem.set(id, sig);
+  return was === undefined || was !== sig;
+};
+
+interface NodeProps {
+  node: UIGraphNode;
+  parentTitle?: string;
+  id: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  still: boolean;
+  busy: string;
+  pressable: boolean;
+  onPress: (a: UIAction) => void;
+  onReveal: (id: string) => void;
+  fade: boolean;
+  fold?: React.ReactNode;
+}
+
+/** One node: a card of the node token's size — the tone or color as a bar on the leading edge and a state dot,
+ *  the icon at the start, the title one line with the badge at its end, the subtitle under, progress along the foot.
+ *  Module-level and memoized, so a redraw re-renders a node in place instead of remounting all of them (keyboard
+ *  focus included). A node without an action is a focusable group, so Tab reaches it too and a screen reader reads
+ *  its whole label. */
+const GraphNode = memo(function GraphNode({ node: n, parentTitle, id, x, y, w, h, still, busy, pressable, onPress, onReveal, fade, fold }: NodeProps) {
+  const color = nodeColor(n);
+  const glyph = glyphOf(n.icon, ROW_ICON);
+  const label = nodeLabel(n, parentTitle);
+  const act = still ? undefined : n.action; // a still preview presses nothing: it opens Full screen
+  const body = (
+    <>
+      {color && <span aria-hidden className="absolute inset-y-0 left-0 w-[3px] bg-current" style={{ color }} />}
+      <span aria-hidden className={cx("flex items-center gap-2", color && "pl-1.5")}>
+        {glyph && <Icon name={glyph} size={14} className="shrink-0" style={color ? { color } : undefined} />}
+      </span>
+      <span className={cx("flex min-w-0 flex-1 flex-col justify-center gap-0.5 py-1.5", color && "pl-1")}>
+        <span className="flex min-w-0 items-center gap-1.5">
+          {color && <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-current" style={{ color }} />}
+          <span className="min-w-0 flex-1 truncate text-meta font-medium text-ink" title={n.title}>{n.title}</span>
+          {n.badge && <Badge badge={n.badge} />}
+        </span>
+        {n.subtitle && <span className="min-w-0 truncate text-submeta text-ink-3" title={n.subtitle}>{n.subtitle}</span>}
+      </span>
+      {n.progress !== undefined && (
+        <span aria-hidden className="absolute inset-x-0 bottom-0 h-[3px]">
+          <span
+            className="h-full rounded-r-full transition-[width] duration-500"
+            style={{ width: `${gaugePercent(n.progress)}%`, background: color ?? "var(--accent)", transitionTimingFunction: EASE }}
+          />
+        </span>
+      )}
+    </>
+  );
+  // The card fades in only when it is new or its fields changed (a move or a redraw that only changes states does not
+  // replay it); reduced motion takes the animation itself away (styles.css).
+  const anim = fade ? { animation: `fade-in 200ms ${EASE} both` } : undefined;
+  const common = { "data-graph-node": id, "aria-label": label, title: label } as const;
+  return (
+    <div role="listitem" data-graph-at={id} className="absolute" style={{ left: x, top: y, width: w, height: h }}>
+      {act ? (
+        <button
+          type="button"
+          {...common}
+          disabled={!!busy || !pressable}
+          onFocus={() => onReveal(id)}
+          onClick={() => onPress(act)}
+          className={cx(
+            "group flex h-full w-full items-center overflow-hidden rounded-card border border-line bg-surface pl-2.5 pr-2 text-left shadow-card",
+            "transition-colors duration-300 enabled:hover:bg-hover focus-visible:z-10 disabled:opacity-60",
+          )}
+          style={anim}
+        >
+          {body}
+        </button>
+      ) : (
+        <div
+          {...common}
+          role="group"
+          tabIndex={still ? -1 : 0}
+          onFocus={() => onReveal(id)}
+          className="flex h-full w-full items-center overflow-hidden rounded-card border border-line bg-surface pl-2.5 pr-2 shadow-card transition-colors duration-300"
+          style={anim}
+        >
+          {body}
+        </div>
+      )}
+      {fold}
+    </div>
+  );
+});
+
+interface FoldProps {
+  id: string;
+  w: number;
+  h: number;
+  down: boolean;
+  folded: boolean;
+  hidden: number;
+  onToggle: (id: string) => void;
+}
+
+/** The fold control: its own control inside the node's own wrapper, on the side where the node's children leave it
+ *  (right for a right tree, below for a down one), never a press of the node. It counters the layer's zoom, so it
+ *  stays 24 px on screen with a 44 px hit at any zoom. */
+const FoldControl = memo(function FoldControl({ id, w, h, down, folded, hidden, onToggle }: FoldProps) {
+  const label = folded ? t("extensions-viewbody.graph_show_hidden", { count: hidden }) : t("extensions-viewbody.graph_fold");
+  return (
+    <button
+      type="button"
+      data-graph-fold={id}
+      aria-label={label}
+      aria-expanded={!folded}
+      title={label}
+      onClick={() => onToggle(id)}
+      className={cx(
+        "touch-hit absolute z-[3] flex size-6 items-center justify-center rounded-full border border-line bg-surface text-ink-3 shadow-hairline",
+        "transition-transform duration-150 hover:text-ink",
+      )}
+      style={{
+        transform: "scale(var(--graph-fold-scale, 1))",
+        transformOrigin: "center",
+        ...(down ? { left: w / 2 - 12, top: h - 13 } : { left: w - 13, top: h / 2 - 12 }),
+      }}
+    >
+      {folded ? (
+        <span className="text-submeta leading-none font-medium tabular-nums">+{hidden}</span>
+      ) : (
+        <Icon name={down ? "chevron" : "chevronRight"} size={11} stroke={2.4} />
+      )}
+    </button>
+  );
+});
+
 /**
  * A view's `graph` (UI version 10): the canvas. On a page it is 70% of the page's visible height (styles.css
  * `graph-canvas`) and the page scrolls around it; `compact` (a card, an overview or an assistant view) draws the
- * still fitted preview (`graph-preview`, 200 px) with no buttons, gestures or node presses — pressing it opens the
- * Full screen overlay, which draws the same canvas over the window with its position, zoom and folds.
+ * still fitted preview (`graph-preview`, 200 px) — a preview is not interactive: pressing it opens the Full screen
+ * overlay, which draws the same canvas over the window with its position, zoom and folds, buttons, gestures and node
+ * presses. `scope` says whose view it is; without it the page's own path is the owner, so two extensions' graphs
+ * never share what a key keeps.
  */
-export function GraphCanvas({ item, compact, busy, onPress, canPress }: {
+export function GraphCanvas({ item, compact, busy, onPress, canPress, scope }: {
   item: UIItem;
   compact?: boolean;
   busy: string;
   onPress: (a: UIAction, destructive?: boolean) => void;
   canPress?: (a: UIAction) => boolean;
+  scope?: string;
 }) {
-  const storeKey = item.key ?? "";
+  const scoped = scope ?? (typeof location !== "undefined" ? location.pathname : "");
+  const keyed = typeof item.key === "string" ? item.key : null;
+  // A keyless graph keeps its state in this instance alone; a keyed one shares it per owner and key. A still
+  // (compact) canvas never reads or writes the shared entry: whatever the person does to a card, the page's own
+  // kept view stays as it was.
+  const instance = useRef<GraphStore | null>(null);
+  if (!instance.current) instance.current = { view: { x: 0, y: 0, zoom: 1 }, moved: false, folds: null };
+  const readStore = (): GraphStore => (keyed !== null ? storeFor(scoped, keyed) : instance.current!);
+  const storeKey = `${scoped}\u0000${keyed ?? ""}`;
   // The person's folds for this `key`, kept across redraws (the store); null until they fold or unfold one, when the
-  // view's `folded` applies, redraws included.
-  const [personFolds, setPersonFolds] = useState<Set<string> | null>(() => storeFor(storeKey).folds);
-  const folds = personFolds ?? new Set(item.folded ?? []);
+  // view's `folded` applies, redraws included. Memoized on its inputs, so a parent's re-render alone does not take
+  // the layout and its listeners apart (a redraw mid-drag would drop the drag).
+  const [personFolds, setPersonFolds] = useState<Set<string> | null>(() => (keyed !== null ? storeFor(scoped, keyed).folds : null));
+  const folds = useMemo(() => personFolds ?? new Set(item.folded ?? []), [personFolds, item.folded]);
   const [full, setFull] = useState(false);
   const stage = useRef<HTMLDivElement>(null);
   const layer = useRef<HTMLDivElement>(null);
@@ -96,7 +264,20 @@ export function GraphCanvas({ item, compact, busy, onPress, canPress }: {
   const controls = useRef<{ zoom: (factor: number) => void; fit: () => void } | null>(null);
   useModalFocus(dialog, full);
   useEscapeClose(full, () => setFull(false));
-  useCloseOnBack(full, () => setFull(false), useMedia(NARROW));
+  // Back closes Full screen before it leaves the page, on a phone's gesture and a desktop's button alike.
+  useCloseOnBack(full, () => setFull(false));
+  // The node pitch follows the text-size choice (applyLook writes data-text-size on <html> when it changes).
+  const [textScale, setTextScale] = useState(textScaleNow);
+  useLayoutEffect(() => {
+    if (typeof MutationObserver === "undefined") return;
+    const mo = new MutationObserver(() => setTextScale(textScaleNow()));
+    mo.observe(document.documentElement, { attributes: true, attributeFilter: ["data-text-size"] });
+    return () => mo.disconnect();
+  }, []);
+  const nodeW = NODE_W * textScale;
+  const nodeH = NODE_H * textScale;
+  const pitchX = PITCH_X * textScale;
+  const pitchY = PITCH_Y * textScale;
 
   // The layout follows from the nodes, edges and folds alone, so a redraw that changes only states keeps every node
   // in place (spec/fixtures/graph-layout/README.md).
@@ -106,18 +287,11 @@ export function GraphCanvas({ item, compact, busy, onPress, canPress }: {
   );
   const byId = useMemo(() => Object.fromEntries((item.nodes ?? []).map((n) => [n.id, n])), [item.nodes]);
   const down = item.direction === "down";
-  const lw = (laid.size[0] - 1) * PITCH_X + NODE_W + 2 * MARGIN;
-  const lh = (laid.size[1] - 1) * PITCH_Y + NODE_H + 2 * MARGIN;
-
-  // A redraw: while the person has not moved the canvas it takes the opening view again; their folds, once made,
-  // override the view's `folded` from then on.
-  const toggleFold = (id: string) => {
-    const next = new Set(folds);
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
-    storeFor(storeKey).folds = next; // the person's choice, kept for this key
-    setPersonFolds(next);
-  };
+  const lw = (laid.size[0] - 1) * pitchX + nodeW + 2 * MARGIN;
+  const lh = (laid.size[1] - 1) * pitchY + nodeH + 2 * MARGIN;
+  // A still preview is the one place this canvas is not interactive: a compact card that is not Full screen. Full
+  // screen is the same canvas as the page's, gestures, buttons, folds and node presses included.
+  const still = !!compact && !full;
 
   // The parent each node is read "under": the first edge that names it as a child, in the view's order.
   const parentTitle = useMemo(() => {
@@ -127,7 +301,10 @@ export function GraphCanvas({ item, compact, busy, onPress, canPress }: {
   }, [laid, byId]);
 
   /** The node's place in the layer: slots × the web's pitch, plus the layer's margin. */
-  const at = (id: string): [number, number] => (laid.at[id] ? [laid.at[id][0] * PITCH_X + MARGIN, laid.at[id][1] * PITCH_Y + MARGIN] : [0, 0]);
+  const at = useCallback((id: string): [number, number] => {
+    const p = laid.at[id];
+    return p ? [p[0] * pitchX + MARGIN, p[1] * pitchY + MARGIN] : [0, 0];
+  }, [laid, pitchX, pitchY]);
   const sel = item.selected && laid.at[item.selected] ? item.selected : undefined;
 
   useLayoutEffect(() => {
@@ -136,14 +313,19 @@ export function GraphCanvas({ item, compact, busy, onPress, canPress }: {
     if (!area || !pane) return;
     const size = () => ({ w: area.clientWidth, h: area.clientHeight });
     // What the store kept for this key: the person's view, and whether they moved it (a redraw keeps both).
-    const kept = storeFor(storeKey);
-    moved.current = kept.moved;
-    if (kept.moved) view.current = kept.view;
+    if (!still) {
+      const kept = readStore();
+      moved.current = kept.moved;
+      if (kept.moved) view.current = kept.view;
+    }
 
     const apply = (v: CanvasView) => {
       view.current = v;
       pane.style.transform = `translate(${v.x}px, ${v.y}px) scale(${v.zoom})`;
-      const s = storeFor(storeKey);
+      // the fold control counters the zoom, so it never shrinks below its own 24 px on screen (a 44 px hit)
+      pane.style.setProperty("--graph-fold-scale", String(Math.max(1, 1 / v.zoom)));
+      if (still) return; // a still preview never writes the store: the page's kept view stays whatever a card did
+      const s = readStore();
       s.view = v;
       s.moved = moved.current;
     };
@@ -164,37 +346,43 @@ export function GraphCanvas({ item, compact, busy, onPress, canPress }: {
 
     const zoomAt = (factor: number, cx: number, cy: number) => {
       const v = view.current;
-      const zoom = clamp(v.zoom * factor, MIN_ZOOM, MAX_ZOOM);
+      const zoom = clamp(v.zoom * factor, still ? MIN_STILL_ZOOM : MIN_ZOOM, MAX_ZOOM);
       if (zoom === v.zoom) return;
       const ratio = zoom / v.zoom;
       moved.current = true;
       apply(clampPan({ x: cx - (cx - v.x) * ratio, y: cy - (cy - v.y) * ratio, zoom }));
     };
 
-    // It opens at the fitted scale held to 50%–100%, centred on `selected`, else with the first root at the top start.
+    // It opens at the fitted scale held to 50%–100%, centred on `selected`, else with the first root at the top
+    // start — a right tree's first root sits halfway down its children, so the layer's corner would not do.
     const open = () => {
       const { w, h } = size();
       if (!w || !h) return;
       const fit = Math.min((w - 2 * INSET) / lw, (h - 2 * INSET) / lh);
       const zoom = clamp(fit, 0.5, 1);
-      if (sel) {
-        const [sx, sy] = at(sel);
-        apply(clampPan({ x: w / 2 - (sx + NODE_W / 2) * zoom, y: h / 2 - (sy + NODE_H / 2) * zoom, zoom }));
-      } else {
-        apply(clampPan({ x: INSET - MARGIN * zoom, y: INSET - MARGIN * zoom, zoom }));
-      }
+      const origin = sel
+        ? (() => {
+            const [sx, sy] = at(sel);
+            return { x: w / 2 - (sx + nodeW / 2) * zoom, y: h / 2 - (sy + nodeH / 2) * zoom };
+          })()
+        : (() => {
+            const [rx, ry] = laid.order.length ? at(laid.order[0]) : [MARGIN, MARGIN];
+            return { x: INSET - rx * zoom, y: INSET - ry * zoom };
+          })();
+      apply(clampPan({ ...origin, zoom }));
     };
 
-    // Fit shows everything, down to 25% (a compact preview is this, always).
-    const fit = () => {
+    // Fit shows everything: the page and Full screen down to 25%, a still preview with no floor above 1%, centred.
+    const fit = (floor = MIN_ZOOM) => {
       const { w, h } = size();
       if (!w || !h) return;
-      const zoom = clamp(Math.min((w - 2 * INSET) / lw, (h - 2 * INSET) / lh), MIN_ZOOM, 1);
+      const zoom = clamp(Math.min((w - 2 * INSET) / lw, (h - 2 * INSET) / lh), floor, 1);
       apply({ x: (w - lw * zoom) / 2, y: (h - lh * zoom) / 2, zoom });
     };
 
     const settled = () => {
-      if (!moved.current) open();
+      if (still) fit(MIN_STILL_ZOOM);
+      else if (!moved.current) open();
       else apply(clampPan(view.current));
     };
 
@@ -265,14 +453,13 @@ export function GraphCanvas({ item, compact, busy, onPress, canPress }: {
 
     controls.current = {
       zoom: (factor: number) => zoomAt(factor, area.clientWidth / 2, area.clientHeight / 2),
-      fit,
+      fit: () => fit(),
     };
-    if (compact) fit();
-    else settled();
+    settled();
     const resized = () => settled();
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(resized);
     observer?.observe(area);
-    if (!compact) {
+    if (!still) {
       area.addEventListener("wheel", wheel, { passive: false });
       area.addEventListener("pointerdown", down);
       area.addEventListener("pointermove", move);
@@ -284,7 +471,7 @@ export function GraphCanvas({ item, compact, busy, onPress, canPress }: {
     return () => {
       observer?.disconnect();
       controls.current = null;
-      if (!compact) {
+      if (!still) {
         area.removeEventListener("wheel", wheel);
         area.removeEventListener("pointerdown", down);
         area.removeEventListener("pointermove", move);
@@ -295,10 +482,11 @@ export function GraphCanvas({ item, compact, busy, onPress, canPress }: {
       }
     };
     // laid changes when the view is drawn again or a fold is toggled; the person's view survives it in `view`.
-  }, [laid, compact, full, storeKey]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- readStore closes over keyed/scoped only through the store's own id
+  }, [laid, still, full, storeKey, keyed, at, sel, nodeW, nodeH, lw, lh]);
 
   // A node the keyboard focuses is panned into view (it does not count as the person moving the canvas).
-  const reveal = (id: string) => {
+  const reveal = useCallback((id: string) => {
     const area = stage.current;
     const pane = layer.current;
     if (!area || !pane) return;
@@ -309,123 +497,70 @@ export function GraphCanvas({ item, compact, busy, onPress, canPress }: {
     const [nx, ny] = at(id);
     const sx = v.x + nx * v.zoom;
     const sy = v.y + ny * v.zoom;
-    const nw = NODE_W * v.zoom;
-    const nh = NODE_H * v.zoom;
+    const nw = nodeW * v.zoom;
+    const nh = nodeH * v.zoom;
     const dx = sx < 12 ? 12 - sx : sx + nw > w - 12 ? w - 12 - nw - sx : 0;
     const dy = sy < 12 ? 12 - sy : sy + nh > h - 12 ? h - 12 - nh - sy : 0;
     if (dx || dy) {
-      view.current = { x: v.x + dx, y: v.y + dy, zoom: v.zoom };
-      pane.style.transform = `translate(${view.current.x}px, ${view.current.y}px) scale(${view.current.zoom})`;
+      const next = { x: v.x + dx, y: v.y + dy, zoom: v.zoom };
+      view.current = next;
+      pane.style.transform = `translate(${next.x}px, ${next.y}px) scale(${next.zoom})`;
+      pane.style.setProperty("--graph-fold-scale", String(Math.max(1, 1 / next.zoom)));
     }
-  };
+  }, [at, nodeW, nodeH]);
 
-  // One node: a card of the node token's size — the tone or color as a bar on the leading edge and a state dot,
-  // the icon at the start, the title one line with the badge at its end, the subtitle under, progress along the foot.
-  const Node = ({ id, compact: still }: { id: string; compact?: boolean }) => {
-    const n = byId[id] as UIGraphNode;
-    const [x, y] = at(id);
-    const color = nodeColor(n);
-    const glyph = glyphOf(n.icon, ROW_ICON);
-    const label = nodeLabel(n, parentTitle[id]);
-    const act = still ? undefined : n.action; // the compact preview presses nothing: it opens Full screen
-    const pressable = !!act && (canPress ? canPress(act) : true);
-    const body = (
-      <>
-        {color && <span aria-hidden className="absolute inset-y-0 left-0 w-[3px] bg-current" style={{ color }} />}
-        <span aria-hidden className={cx("flex items-center gap-2", color && "pl-1.5")}>
-          {glyph && <Icon name={glyph} size={14} className="shrink-0 text-ink-3" />}
-        </span>
-        <span className={cx("flex min-w-0 flex-1 flex-col justify-center gap-0.5 py-1.5", color && "pl-1")}>
-          <span className="flex min-w-0 items-center gap-1.5">
-            {color && <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-current" style={{ color }} />}
-            <span className="min-w-0 flex-1 truncate text-meta font-medium text-ink" title={n.title}>{n.title}</span>
-            {n.badge && <Badge badge={n.badge} />}
-          </span>
-          {n.subtitle && <span className="min-w-0 truncate text-submeta text-ink-3" title={n.subtitle}>{n.subtitle}</span>}
-        </span>
-        {n.progress !== undefined && (
-          <span aria-hidden className="absolute inset-x-0 bottom-0 h-[3px]">
-            <span
-              className="h-full rounded-r-full transition-[width] duration-500"
-              style={{ width: `${gaugePercent(n.progress)}%`, background: color ?? "var(--accent)", transitionTimingFunction: EASE }}
-            />
-          </span>
-        )}
-      </>
-    );
-    return (
-      <div role="listitem" data-graph-at={id} className="absolute" style={{ left: x, top: y, width: NODE_W, height: NODE_H }}>
-        {act ? (
-          <button
-            type="button"
-            data-graph-node={id}
-            aria-label={label}
-            title={label}
-            disabled={!!busy || !pressable}
-            onFocus={() => reveal(id)}
-            onClick={() => onPress(act)}
-            className={cx(
-              "group flex h-full w-full items-center overflow-hidden rounded-card border border-line bg-surface pl-2.5 pr-2 text-left shadow-card",
-              "transition-colors duration-300 enabled:hover:bg-hover focus-visible:z-10 disabled:opacity-60",
-            )}
-            style={{ animation: `fade-in 200ms ${EASE} both` }}
-          >
-            {body}
-          </button>
-        ) : (
-          <div
-            data-graph-node={id}
-            aria-label={label}
-            title={label}
-            className="flex h-full w-full items-center overflow-hidden rounded-card border border-line bg-surface pl-2.5 pr-2 shadow-card transition-colors duration-300"
-            style={{ animation: `fade-in 200ms ${EASE} both` }}
-          >
-            {body}
-          </div>
-        )}
-      </div>
-    );
-  };
-
-  // The fold control: its own control on the side where the node's children leave it, never a press of the node.
-  const Fold = ({ id }: { id: string }) => {
-    const [x, y] = at(id);
-    const folded = folds.has(id);
-    const hidden = laid.folds[id];
-    const label = folded ? t("extensions-viewbody.graph_show_hidden", { count: hidden }) : t("extensions-viewbody.graph_fold");
-    return (
-      <button
-        type="button"
-        data-graph-fold={id}
-        aria-label={label}
-        aria-expanded={folded}
-        title={label}
-        onClick={() => toggleFold(id)}
-        className={cx(
-          "touch-hit absolute z-[1] flex size-6 items-center justify-center rounded-full border border-line bg-surface text-ink-3 shadow-hairline",
-          "transition-transform duration-150 hover:text-ink",
-        )}
-        style={down ? { left: x + NODE_W / 2 - 12, top: y + NODE_H - 13 } : { left: x + NODE_W - 13, top: y + NODE_H / 2 - 12 }}
-      >
-        {folded ? (
-          <span className="text-submeta leading-none font-medium tabular-nums">+{hidden}</span>
-        ) : (
-          <Icon name={down ? "chevron" : "chevronRight"} size={11} stroke={2.4} />
-        )}
-      </button>
-    );
-  };
+  const toggle = useCallback((id: string) => {
+    const next = new Set(folds);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    readStore().folds = next; // the person's choice, kept for this key (or this instance)
+    setPersonFolds(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- folds is the only input that matters
+  }, [folds]);
+  const nodes = (
+    // the canvas reads as a list of its visible nodes in reading order; each listitem wraps its node and its own fold
+    <div role="list" className="absolute top-0 left-0">
+      {laid.order.map((id) => {
+        const n = byId[id] as UIGraphNode;
+        const [x, y] = at(id);
+        const act = still ? undefined : n.action;
+        const pressable = !!act && (canPress ? canPress(act) : true);
+        const folded = folds.has(id);
+        const hidden = laid.folds[id];
+        const needsFold = !still && hidden !== undefined;
+        return (
+          <GraphNode
+            key={id}
+            node={n}
+            parentTitle={parentTitle[id]}
+            id={id}
+            x={x}
+            y={y}
+            w={nodeW}
+            h={nodeH}
+            still={still}
+            busy={busy}
+            pressable={pressable}
+            onPress={onPress}
+            onReveal={reveal}
+            fade={layer.current ? fadesIn(layer.current, id, drawSig(n, parentTitle[id])) : true}
+            fold={needsFold ? <FoldControl id={id} w={nodeW} h={nodeH} down={down} folded={folded} hidden={hidden} onToggle={toggle} /> : undefined}
+          />
+        );
+      })}
+    </div>
+  );
 
   const canvas = (
     <div
       ref={stage}
       role="group"
       aria-label={t("extensions-viewbody.graph")}
-      tabIndex={compact ? -1 : 0}
+      tabIndex={still ? -1 : 0}
       data-graph-stage=""
       className={cx(
         "relative h-full w-full touch-none overflow-hidden overscroll-none select-none rounded-card focus-visible:outline-2 focus-visible:outline-accent",
-        !compact && "cursor-grab active:cursor-grabbing",
+        !still && "cursor-grab active:cursor-grabbing",
       )}
     >
       <div ref={layer} data-graph-layer="" className="absolute top-0 left-0 origin-top-left" style={{ width: lw, height: lh }}>
@@ -435,8 +570,8 @@ export function GraphCanvas({ item, compact, busy, onPress, canPress }: {
             const [fx, fy] = at(from);
             const [tx, ty] = at(to);
             const [sx, sy, ex, ey] = down
-              ? [fx + NODE_W / 2, fy + NODE_H, tx + NODE_W / 2, ty]
-              : [fx + NODE_W, fy + NODE_H / 2, tx, ty + NODE_H / 2];
+              ? [fx + nodeW / 2, fy + nodeH, tx + nodeW / 2, ty]
+              : [fx + nodeW, fy + nodeH / 2, tx, ty + nodeH / 2];
             const k = Math.max(24, down ? (ey - sy) / 2 : (ex - sx) / 2);
             return (
               <path
@@ -456,59 +591,60 @@ export function GraphCanvas({ item, compact, busy, onPress, canPress }: {
           const ys = f.members.map((m) => at(m)[1]);
           const x = Math.min(...xs) - FRAME_PAD;
           const y = Math.min(...ys) - CAPTION;
-          const w = Math.max(...xs) + NODE_W - Math.min(...xs) + 2 * FRAME_PAD;
-          const h = Math.max(...ys) + NODE_H - Math.min(...ys) + FRAME_PAD + CAPTION;
+          const w = Math.max(...xs) + nodeW - Math.min(...xs) + 2 * FRAME_PAD;
+          const h = Math.max(...ys) + nodeH - Math.min(...ys) + FRAME_PAD + CAPTION;
           return (
             <div key={i} data-graph-frame={f.group} aria-hidden className="absolute rounded-card bg-inset" style={{ left: x, top: y, width: w, height: h }}>
-              <span className="absolute top-[6px] left-[12px] text-submeta text-ink-3">{f.group}</span>
+              <span className="absolute top-1.5 left-3 text-submeta text-ink-3">{f.group}</span>
             </div>
           );
         })}
         {sel && (() => {
           const [x, y] = at(sel);
-          return <span aria-hidden data-graph-selected="" className="pointer-events-none absolute z-[1] rounded-[12px] shadow-[0_0_0_2px_var(--accent)]" style={{ left: x - 2, top: y - 2, width: NODE_W + 4, height: NODE_H + 4 }} />;
+          return <span aria-hidden data-graph-selected="" className="pointer-events-none absolute z-[1] rounded-[calc(var(--radius-card)+2px)] shadow-[0_0_0_2px_var(--accent)]" style={{ left: x - 2, top: y - 2, width: nodeW + 4, height: nodeH + 4 }} />;
         })()}
-        {/* the canvas reads as a list of its visible nodes in reading order; each listitem wraps its node */}
-        <div role="list" className="absolute top-0 left-0">
-          {laid.order.map((id) => (
-            <Node key={id} id={id} compact={compact} />
-          ))}
-        </div>
-        {/* a fold control never shows in the compact preview: no presses there */}
-        {!compact && laid.order.filter((id) => laid.folds[id] !== undefined).map((id) => (
-          <Fold key={id} id={id} />
-        ))}
+        {nodes}
       </div>
     </div>
   );
 
   const buttons = (
-    <div className={cx("absolute right-3 bottom-3 z-[2] flex items-center gap-0.5 rounded-full border border-line bg-surface/90 p-1 shadow-card backdrop-blur")}>
+    <div className="absolute right-3 bottom-3 z-[2] flex items-center gap-0.5 rounded-full border border-line bg-surface/90 p-1 shadow-card backdrop-blur">
       <IconButton icon="minus" label={t("extensions-viewbody.graph_zoom_out")} size={32} onClick={() => controls.current?.zoom(1 / STEP)} />
       <IconButton icon="plus" label={t("extensions-viewbody.graph_zoom_in")} size={32} onClick={() => controls.current?.zoom(STEP)} />
-      <IconButton icon="external" label={t("extensions-viewbody.graph_fit")} size={32} onClick={() => controls.current?.fit()} />
+      <IconButton icon="fit" label={t("extensions-viewbody.graph_fit")} size={32} onClick={() => controls.current?.fit()} />
       {!full && <IconButton icon="expand" label={t("extensions-viewbody.graph_full_screen")} size={32} onClick={() => setFull(true)} />}
     </div>
   );
 
   if (full) {
-    return createPortal(
-      <div
-        ref={dialog}
-        role="dialog"
-        aria-modal="true"
-        aria-label={t("extensions-viewbody.graph")}
-        className="fixed inset-0 z-50 flex flex-col p-2 outline-none sm:p-4" style={{ background: "var(--page)" }}
-      >
-        <div className="flex shrink-0 justify-end">
-          <IconButton icon="x" label={t("extensions-viewbody.graph_close")} size={36} onClick={() => setFull(false)} />
-        </div>
-        <div className="relative min-h-0 flex-1">
-          {canvas}
-          {buttons}
-        </div>
-      </div>,
-      document.body,
+    return (
+      <>
+        {/* the page keeps the card's height while the overlay is over it, so it does not jump when it closes */}
+        {compact && (
+          <div aria-hidden className="px-4 py-3">
+            <div className="graph-preview" />
+          </div>
+        )}
+        {createPortal(
+          <div
+            ref={dialog}
+            role="dialog"
+            aria-modal="true"
+            aria-label={t("extensions-viewbody.graph")}
+            className="fixed inset-0 z-50 flex flex-col p-2 outline-none sm:p-4" style={{ background: "var(--page)" }}
+          >
+            <div className="flex shrink-0 justify-end">
+              <IconButton icon="x" label={t("extensions-viewbody.graph_close")} size={36} onClick={() => setFull(false)} />
+            </div>
+            <div className="relative min-h-0 flex-1">
+              {canvas}
+              {buttons}
+            </div>
+          </div>,
+          document.body,
+        )}
+      </>
     );
   }
   if (compact) {
