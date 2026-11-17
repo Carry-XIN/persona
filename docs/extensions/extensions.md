@@ -2710,8 +2710,10 @@ color's tint, its arc with round ends; the value is in `text-xl` (`text-lg` in a
 tiles keep the grid's columns (`max_columns`, at least 150 px each), so a phone has two a line. The web's native stream still sends 7.
 `web/e2e/extension-gauge.mjs` checks it in a browser against the mock (`MOCK_EXTENSIONS=1 MOCK_EXTENSION_GAUGE=1`).
 
-**iOS and Android** have the field in their generated types and still send 8: the hub draws them the tile without its ring until
-they draw version 9 (their own changes, after #9337).
+**iOS and Android** both draw the ring natively, with the named colour's tint for its track, the value and unit (or percentage)
+in its centre, and the exact meter readout; Reduce Motion snaps ratio changes. Android's `ExtensionGaugeRing` is shared by grid
+and carousel tiles at 96 dp on a page and 80 dp in a compact card. `JTile` keeps the existing surface, badge, switch, action and
+extra-action menu, and adds meter semantics without removing the button behaviour of an actionable tile.
 
 ## UI version 10 (#9727)
 
@@ -2795,7 +2797,16 @@ client (whose components never include `graph`) gets the same rows. Extensions m
 
 **iOS** (#9727): see `apple/Persona/Views/Settings/ExtensionGraph.swift`.
 
-**Android** (#9727): see `ExtensionGraph.kt` in `android/feature/settings`.
+**Android** (#9727) draws the canvas in `android/feature/settings/src/main/kotlin/persona/feature/settings/ExtensionGraph.kt` and
+sends `10` (`HttpExtensionManagement.UI_VERSION`). The pure-Kotlin `ExtensionGraphLayout` reproduces the shared slot layout and
+reading order; the Compose canvas draws its curves, group frames, node cards, selected ring and separate 48 dp fold targets with
+the design system's tokens in every style and theme. Transformable gestures and the floating controls zoom from 25% to 200%, Fit
+includes the whole graph, and `JFullScreen` shares the originating canvas's transform and folds. `rememberSaveable`, keyed by the
+graph key, keeps both across recreation; an untouched canvas takes its opening view again after a redraw. A compact card is a
+200 dp still preview whose only action opens Full screen. Nodes use the existing row-action path and read aloud in shared order,
+including badge, subtitle, progress and parent; the graph never enters the native stream's component set, whose clients still
+receive the hub's rows. `ExtensionGraphLayoutTest` replays every shared case, while the Compose tests cover actions, folding,
+restoration, full-screen continuity and compact-preview boundaries.
 
 ## System-level placements (#1858)
 
