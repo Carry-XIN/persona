@@ -271,6 +271,14 @@ func (s *Service) replaceBackground(ctx context.Context, cfg Settings, old, why 
 		r.replacement[id] = true
 	}
 	r.mu.Unlock()
+	// The owner's model pick for the background supervisor goes on with the conversation that does its work: a pick is
+	// never dropped behind the owner's back (model_pick.go). The old one keeps its own in the archive.
+	if pick, ok := s.modelPickOf(ctx, cfg.BackgroundSupervisorMachineID, old); ok {
+		pick.At = time.Now().UTC()
+		if err := s.setModelPick(ctx, id, &pick); err != nil {
+			s.logf("supervise: carry the background supervisor's model pick to %s: %v", short(id), err)
+		}
+	}
 	s.putAwayBackground(ctx, cfg.BackgroundSupervisorMachineID, old, time.Now())
 	return id
 }

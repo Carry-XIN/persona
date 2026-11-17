@@ -282,7 +282,7 @@ func (s *Service) deliverDigest(ctx context.Context, here Settings, to string, l
 		s.logf("supervise: %d signal(s) to the main conversation", len(entries))
 	}
 	c, ok := s.session(ctx, here.MachineID, to)
-	if !ok || c.Starting || !msg.Interject && (c.Status == proto.StatusWorking || s.relayWaits(to, msg)) {
+	if !ok || c.Starting || s.relayReplacing(to) || !msg.Interject && (c.Status == proto.StatusWorking || s.relayWaits(to, msg)) {
 		if !s.queueDigest(to, msg, kept, now, prev) {
 			return false
 		}
@@ -515,6 +515,9 @@ func (s *Service) digestEntry(ctx context.Context, g superviseSignal, web string
 		e.Detail = prompts.RenderDraftPR(prompts.DraftPR{Language: answerLanguage(string(s.botLang(ctx))),
 			URL: draft.URL, Head: draft.HeadOID})
 	}
+	// The last review, shown only in a Fresh message (supervise_round.go): a decision reply's round confirms the decision
+	// that review put to the owner.
+	e.LastReview = s.lastReviewEntry(ctx, v)
 	if g.Kind == sigDecisionReply {
 		e.AgentReply = &prompts.DecisionAgentReply{Language: answerLanguage(string(s.botLang(ctx))),
 			Machine: replyAsk.AgentReply.MachineID, Session: replyAsk.AgentReply.SessionID}
@@ -524,7 +527,6 @@ func (s *Service) digestEntry(ctx context.Context, g superviseSignal, web string
 		e.Review = &prompts.SuperviseReviewed{State: a.State, Count: a.Count, Blocking: a.Blocking, Findings: a.Findings, Error: a.Error}
 	}
 	s.briefEntry(ctx, t.ID, &e) // what was asked, in the owner's words (task_brief_digest.go)
-	e.LastReview = s.lastReviewEntry(ctx, v)
 	if g.Kind == sigEscalated {
 		e.Recommend = g.Ask // the leader's recommendation (escalate)
 		e.Asks = g.Cards

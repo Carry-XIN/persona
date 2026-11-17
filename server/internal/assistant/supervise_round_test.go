@@ -624,3 +624,32 @@ func TestBackgroundKeepsContextSetting(t *testing.T) {
 		}
 	})
 }
+
+// A background supervisor replaced because its rounds outgrew it keeps the model the owner picked for it (#9248: a pick
+// is never dropped behind the user's back); the old one keeps its own in the archive.
+func TestBackgroundReplacementKeepsItsModelPick(t *testing.T) {
+	s, f, todo, _ := newRoundService(t)
+	ctx := context.Background()
+	bg := withBackgroundBG1(t, s, f)
+	machine := s.settings(ctx).BackgroundSupervisorMachineID
+	pick := modelPick{MachineID: machine, Launcher: "claude", Model: "example-model", At: time.Now().UTC()}
+	if err := s.setModelPick(ctx, bg, &pick); err != nil {
+		t.Fatal(err)
+	}
+	roundAnswers(f, map[string]any{"context": "fresh", "transcript_bytes": backgroundTranscriptLimit + 1})
+	wakeRound(s, superviseSignal{Todo: todo.ID, Kind: sigStalled, Key: "k1", Minutes: 50})
+	waitFor(t, "the answer noted", func() bool { return outgrownOf(s, bg) == "oversized" })
+	listRound(f, bg, proto.StatusIdle, false)
+	wakeRound(s, superviseSignal{Todo: todo.ID, Kind: sigIdle, Key: "k2"})
+	next := s.settings(ctx).BackgroundSupervisor
+	if next == bg || next == "" {
+		t.Fatalf("not replaced: %q", next)
+	}
+	got, ok := s.modelPickOf(ctx, machine, next)
+	if !ok || got.Launcher != pick.Launcher || got.Model != pick.Model {
+		t.Fatalf("the replacement's pick: %+v %v, want %+v", got, ok, pick)
+	}
+	if old, ok := s.modelPickOf(ctx, machine, bg); !ok || old.Model != pick.Model {
+		t.Fatalf("the archived one's pick: %+v %v, want it kept", old, ok)
+	}
+}

@@ -308,6 +308,15 @@ func (s *Service) relayWaits(to string, msg relayMsg) bool {
 	return b.replacing[to] || len(b.st.Queue[to]) > 0 || b.holdLocked(to, msg, time.Now()) > 0
 }
 
+// relayReplacing: conversation to is a background supervisor reserved for its replacement (supervise_round.go
+// backgroundOutgrown): nothing goes in straight, not even a decision reply that may interject into a running turn.
+func (s *Service) relayReplacing(to string) bool {
+	b := &s.relays
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.replacing[to]
+}
+
 // drainAfter drains conversation id's queue once more in wait, when the hold on what waits there ends. One timer per
 // conversation: a later call replaces it.
 func (s *Service) drainAfter(machine, id string, wait time.Duration) {
