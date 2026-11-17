@@ -113,7 +113,8 @@ import { useTodoField } from "./use-todo-field";
 import { todoUltracode } from "../lib/ultracode";
 import { UltraMark } from "./chat/Ultracode";
 import { boundThread, threadLine, threadName, todoThreadsOn, unbindTodoThread } from "../lib/todo-thread";
-import { seenCanFile, setTodoSeen, todoSeenOn } from "../lib/todo-seen";
+import { setTodoSeen, todoSeenOn } from "../lib/todo-seen";
+import { seenCanFile } from "../lib/todo-details";
 import { retryKey, retryTask, useFeed } from "../lib/feed";
 import { dueOn, duePatch, todoRowMenu } from "./todo-row-menu";
 
