@@ -39,18 +39,7 @@ struct PreviewChooser: View {
                 .navigationSubtitleWhenSupported(machineName + " · " + Fmt.path(preview.cwd, home: machine?.home))
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Group {
-                            if #available(iOS 26.0, *) {
-                                Button(role: .close) { dismiss() }
-                            } else {
-                                // iOS 18 has no close role (#6730): the same ✕ on a plain button.
-                                Button { dismiss() } label: { ThemedIcon(Theme.Icon.close) }
-                                    .accessibilityLabel(Text("Close"))
-                            }
-                        }
-                        .accessibilityIdentifier("preview-close")
-                    }
+                    SheetClose(id: "preview-close") { dismiss() }
                 }
         }
         .presentationDetents([.medium, .large], selection: $detent)
