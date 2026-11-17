@@ -2710,8 +2710,9 @@ color's tint, its arc with round ends; the value is in `text-xl` (`text-lg` in a
 tiles keep the grid's columns (`max_columns`, at least 150 px each), so a phone has two a line. The web's native stream still sends 7.
 `web/e2e/extension-gauge.mjs` checks it in a browser against the mock (`MOCK_EXTENSIONS=1 MOCK_EXTENSION_GAUGE=1`).
 
-**iOS and Android** have the field in their generated types and still send 8: the hub draws them the tile without its ring until
-they draw version 9 (their own changes, after #9337).
+**iOS and Android** draw the ring on grid and carousel tiles, with the centre value and unit (or the percentage), the
+named palette colour, the same accessibility reading and an eased ratio change which snaps with Reduce Motion. Their
+native streams stay at their earlier versions, so the hub still gives a stream the downgraded tile.
 
 ## UI version 10 (#9727)
 
@@ -2793,7 +2794,19 @@ client (whose components never include `graph`) gets the same rows. Extensions m
 
 **The web** (#9727): see `web/src/views/extensions/ViewBody10.tsx`.
 
-**iOS** (#9727): see `apple/Persona/Views/Settings/ExtensionGraph.swift`.
+**iOS** (#9727) draws all of it and sends `10` for whole pages and the app's cards and sections
+(`ExtensionUIContext.pageVersion` and `cardVersion`); the native stream stays at `8` and receives rows, and the frozen
+Mac app keeps its earlier version. `apple/Persona/Views/Settings/ExtensionGraphLayout.swift` is a pure, nonisolated
+copy of the shared layout, checked against every field of every shared case by `ExtensionGraphLayoutTests`.
+`apple/Persona/Views/Settings/ExtensionGraph.swift` draws one edge `Canvas`, the group frames and native node cards,
+with 44 pt fold targets, reading-order VoiceOver elements and a fold custom action. Drag, pinch and iPad pointer
+scrolling move the canvas; the floating Zoom out, Zoom in, Fit and Full screen controls use the design system, and the
+cover keeps the same model, transform and folds. A page gives it 70% of the visible height, clamped to 320–900 pt; a
+compact card has a still 200 pt preview which opens the cover. `ExtensionGraphModel` lays out and restores off the
+main actor, persists the transform and explicit fold choices per component key, scoped to the hub, page and placement,
+in a bounded `StateCache` document, and refits only while the canvas is untouched. `ExtensionGraphModelTests` covers restoration, folding and fitting;
+`ExtensionGraphUITests` checks zoom, fold, node push, full screen and the compact preview against the mock
+(`MOCK_EXTENSIONS=1 MOCK_EXTENSION_GRAPH=1`).
 
 **Android** (#9727): see `ExtensionGraph.kt` in `android/feature/settings`.
 
