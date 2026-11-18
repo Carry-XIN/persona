@@ -1274,7 +1274,7 @@ func (s *Service) describeAgents(ctx context.Context, state, machine, query stri
 					continue
 				}
 			case "active":
-				if c.State != proto.StateNeedsYou && c.State != proto.StateWorking && c.State != proto.StateUnread && !c.AwaitsReply {
+				if st := agentsListState(c); st != proto.StateNeedsYou && st != proto.StateWorking && st != proto.StateUnread && !c.AwaitsReply {
 					continue // a seen one still asking the user is active too (#5096)
 				}
 			case "done":
@@ -1286,7 +1286,7 @@ func (s *Service) describeAgents(ctx context.Context, state, machine, query stri
 					continue
 				}
 			default:
-				if c.State != state {
+				if agentsListState(c) != state {
 					continue
 				}
 			}
@@ -1304,7 +1304,7 @@ func (s *Service) describeAgents(ctx context.Context, state, machine, query stri
 	}
 	order := map[string]int{proto.StateNeedsYou: 0, proto.StateWorking: 1, proto.StateUnread: 2, proto.StateIdle: 3}
 	sort.SliceStable(rows, func(i, j int) bool {
-		oi, oj := order[rows[i].c.State], order[rows[j].c.State]
+		oi, oj := order[agentsListState(rows[i].c)], order[agentsListState(rows[j].c)]
 		if oi != oj {
 			return oi < oj
 		}
@@ -1319,7 +1319,7 @@ func (s *Service) describeAgents(ctx context.Context, state, machine, query stri
 	}
 	for _, r := range rows {
 		c := r.c
-		fmt.Fprintf(&b, "- [%s] %s · machine=%s session_id=%s · %s", agentsListState(c), agentLabel(c), r.m.ID, c.SessionID, c.Cwd)
+		fmt.Fprintf(&b, "- [%s] %s · machine=%s session_id=%s · %s", agentsListLabel(c), agentLabel(c), r.m.ID, c.SessionID, c.Cwd)
 		if c.SourceKind != "" {
 			fmt.Fprintf(&b, " · source=%s instance=%s", c.SourceKind, c.SourceInstanceID)
 			if c.Capabilities == nil || !c.Capabilities.Send {
@@ -1428,14 +1428,27 @@ func sendParams(session, text string, dismissNotice bool) map[string]any {
 	return p
 }
 
-// agentsListState is how agents_list names c's state: as the apps' rows do, except a turn that stopped unfinished on
-// a turn error (the model service cut it off, it had no output, or Persona's Stop interrupted it), which is not "done,
-// not seen" (#10187). A usage limit has its own mark on the line.
+// silentRow: c stopped on the hub's own word that its turn had no output (silent_turns.go, #10187): not finished, and
+// the owner's to continue, as the apps' Needs-you tray has an interrupted task.
+func silentRow(c proto.Session) bool {
+	return c.TurnError != "" && proto.SilentTurnKind(c.TurnErrorKind) && (c.State == proto.StateUnread || c.State == proto.StateIdle)
+}
+
+// agentsListState is c's state as agents_list filters and sorts it: a silentRow is needs_you, as the snapshot groups it
+// (snapshotAgentGroup), never "done, not seen".
 func agentsListState(c proto.Session) string {
-	if c.TurnError == "" || c.TurnErrorKind == proto.TurnErrorUsageLimit || c.State != proto.StateUnread && c.State != proto.StateIdle {
-		return stateNames[c.State]
+	if silentRow(c) {
+		return proto.StateNeedsYou
 	}
-	if c.TurnErrorKind == proto.TurnErrorStopped {
+	return c.State
+}
+
+// agentsListLabel is how agents_list names c's state: as the apps' rows do, a silentRow as what it is.
+func agentsListLabel(c proto.Session) string {
+	switch {
+	case !silentRow(c):
+		return stateNames[c.State]
+	case c.TurnErrorKind == proto.TurnErrorStopped:
 		return "被停下了，没做完" // i18n-ignore: agents_list output for the model, as the lines around it
 	}
 	return "中断了，没做完" // i18n-ignore: agents_list output for the model, as the lines around it

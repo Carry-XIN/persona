@@ -118,10 +118,15 @@ func TestSilentTurn(t *testing.T) {
 // task's agent starts as s1 on box.
 func newFleetTaskTest(t *testing.T) *fleetTest {
 	t.Helper()
+	return fleetTaskTest(t, newFleetTestNoStore(t))
+}
+
+// fleetTaskTest is newFleetTaskTest on ft (with a store or none).
+func fleetTaskTest(t *testing.T, ft *fleetTest) *fleetTest {
+	t.Helper()
 	old := quietNoticeDelay
 	quietNoticeDelay = 30 * time.Millisecond
 	t.Cleanup(func() { quietNoticeDelay = old })
-	ft := newFleetTestNoStore(t)
 	ft.d.add("box", "box")
 	ft.d.add("server", "server")
 	ft.f.sessions["box"], ft.f.sessions["server"] = nil, nil
@@ -148,11 +153,12 @@ func TestSilentTaskTurnIsNotShownAsDone(t *testing.T) {
 		cause   string
 		summary string
 		label   string // the snapshot's word for the task
+		listed  string // agents_list's
 	}{
 		{name: "the model answered nothing", kind: proto.TurnErrorNoOutput, cause: causeNoOutput, summary: interruptedSummary,
-			label: taskStateLabel("interrupted")},
+			label: taskStateLabel("interrupted"), listed: "中断了，没做完"},
 		{name: "its conversation was stopped", stop: true, kind: proto.TurnErrorStopped, cause: causeStopped,
-			summary: i18n.T(i18n.Default, "assistant-tasks.stopped"), label: taskStateLabel("stopped")},
+			summary: i18n.T(i18n.Default, "assistant-tasks.stopped"), label: taskStateLabel("stopped"), listed: "被停下了，没做完"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			ft := newFleetTaskTest(t)
@@ -228,8 +234,19 @@ func TestSilentTaskTurnIsNotShownAsDone(t *testing.T) {
 			if shown != c.label {
 				t.Fatalf("snapshot %q, want %q", shown, c.label)
 			}
-			if list := s.describeAgents(ctx, "", "box", ""); strings.Contains(list, "["+stateNames[proto.StateUnread]+"]") {
+			// agents_list names it as what it is, filters it with what needs the owner, never with "done, not seen", and
+			// the snapshot's Agents put it there too.
+			if list := s.describeAgents(ctx, "", "box", ""); !strings.Contains(list, "["+c.listed+"]") {
 				t.Fatalf("agents_list:\n%s", list)
+			}
+			if list := s.describeAgents(ctx, proto.StateUnread, "box", ""); strings.Contains(list, "session_id=s1") {
+				t.Fatalf("agents_list state=unread:\n%s", list)
+			}
+			if list := s.describeAgents(ctx, proto.StateNeedsYou, "box", ""); !strings.Contains(list, "session_id=s1") {
+				t.Fatalf("agents_list state=needs_you:\n%s", list)
+			}
+			if g := snapshotAgentGroup(row, time.Now()); g != snapshotAgentNeedsYou {
+				t.Fatalf("snapshot group %q", g)
 			}
 			// A Persona-made verdict is no model error for Session Triage: no card asks the user to see to the model, and
 			// nothing continues the turn by itself.
@@ -237,11 +254,36 @@ func TestSilentTaskTurnIsNotShownAsDone(t *testing.T) {
 				t.Fatalf("triage %+v (skip %v)", w, skip)
 			}
 
-			// The agent works again: its row no longer carries the verdict.
+			// "Continue" goes once: a second tap while the agent has not taken it up sends nothing more, though the node's
+			// row has no turn error of its own for the hub's verdict.
+			for range 2 {
+				if _, err := s.continueTask(ctx, todo); err != nil {
+					t.Fatal(err)
+				}
+			}
+			time.Sleep(300 * time.Millisecond) // a poll of the guard
+			if _, err := s.continueTask(ctx, todo); err != nil {
+				t.Fatal(err)
+			}
+			continues := 0
+			ft.f.mu.Lock()
+			for _, c := range ft.f.calls {
+				if c.Device == "box" && c.Method == DeviceSessionSend && strings.Contains(string(c.Params), `"session_id":"s1"`) {
+					continues++
+				}
+			}
+			ft.f.mu.Unlock()
+			if n := continues; n != 1 {
+				t.Fatalf("%d sends of Continue, want 1", n)
+			}
+
+			// The agent works again, its row as it was (the same time, no Rev): the start ends the verdict, and the row
+			// it stops at next carries none.
 			again := done
-			again.Status, again.UpdatedAt = proto.StatusWorking, time.Now()
+			again.Status = proto.StatusWorking
 			ft.sessions("box", again)
-			again.Status, again.UpdatedAt, again.LastText = proto.StatusDone, time.Now().Add(time.Minute), "修好了"
+			waitFor(t, "the verdict to end with the start", func() bool { return len(s.quietMarks("box")) == 0 })
+			again.Status = proto.StatusDone
 			ft.d.setSessions("box", []proto.Session{again})
 			if row := listed(t, s, "box", "s1"); row.TurnError != "" {
 				t.Fatalf("a later turn still carries the verdict: %q (%s)", row.TurnError, row.TurnErrorKind)
@@ -250,33 +292,68 @@ func TestSilentTaskTurnIsNotShownAsDone(t *testing.T) {
 	}
 }
 
-// What a turn with no output is: stopped when Persona's Stop interrupted the agent (whether or not the transcript has
-// the interrupted notice for it), until a turn end of it is taken up; no output otherwise. A turn with output, or one
-// the user stopped themselves, is neither.
+// What a turn with no output is: stopped when Persona's Stop interrupted that very turn (whether or not the transcript
+// has the interrupted notice for it), no output otherwise. A turn with output, or one the user stopped themselves, is
+// neither. The Stop is the turn's only for the stretch of work it was sent in, for a turn end the hub heard after it
+// (not one that ended by itself before), within stopCounts of it, and until a turn end of it is taken up.
 func TestQuietTurnKind(t *testing.T) {
 	s, _ := newQuietService(t)
 	prompt := proto.Item{Kind: proto.KindText, Role: "user", Text: "做吧"}
 	esc := proto.Item{Kind: proto.KindNotice, Role: "system", Text: userStoppedNotice}
 	reply := proto.Item{Kind: proto.KindText, Role: "assistant", Text: "好了"}
-	check := func(when string, items []proto.Item, want string) {
+	a := time.Now().Add(-time.Minute) // turn A's stretch of work began
+	check := func(when string, items []proto.Item, since time.Time, want string) {
 		t.Helper()
-		if got := s.quietTurnKind("box", "s1", items); got != want {
+		if got := s.quietTurnKind("box", "s1", items, since); got != want {
 			t.Errorf("%s: %q, want %q", when, got, want)
 		}
 	}
-	check("nothing", []proto.Item{prompt}, proto.TurnErrorNoOutput)
-	check("the user's Esc", []proto.Item{prompt, esc}, "")
-	check("a reply", []proto.Item{prompt, reply}, "")
-	check("not read", nil, "")
-	s.noteStopped("box", "s1")
-	check("Persona's Stop", []proto.Item{prompt}, proto.TurnErrorStopped)
-	check("Persona's Stop, with the notice", []proto.Item{prompt, esc}, proto.TurnErrorStopped)
-	check("Persona's Stop after a reply", []proto.Item{prompt, reply}, "")
-	if s.quietTurnKind("box", "s2", []proto.Item{prompt}) != proto.TurnErrorNoOutput {
+	check("nothing", []proto.Item{prompt}, a, proto.TurnErrorNoOutput)
+	check("the user's Esc", []proto.Item{prompt, esc}, a, "")
+	check("a reply", []proto.Item{prompt, reply}, a, "")
+	check("not read", nil, a, "")
+
+	// A turn that ended before the Stop was sent (heard first): not the Stop's.
+	s.stopTurnEnded("box", "s1", time.Now())
+	s.noteStopped("box", "s1", a)
+	check("ended before the Stop", []proto.Item{prompt}, a, proto.TurnErrorNoOutput)
+
+	s.stopTurnEnded("box", "s1", time.Now())
+	check("Persona's Stop", []proto.Item{prompt}, a, proto.TurnErrorStopped)
+	check("Persona's Stop, with the notice", []proto.Item{prompt, esc}, a, proto.TurnErrorStopped)
+	check("Persona's Stop after a reply", []proto.Item{prompt, reply}, a, "")
+	check("a later turn B, its own stretch", []proto.Item{prompt}, time.Now(), proto.TurnErrorNoOutput)
+	if s.quietTurnKind("box", "s2", []proto.Item{prompt}, a) != proto.TurnErrorNoOutput {
 		t.Error("a Stop of another agent counted")
 	}
 	s.forgetStop("box", "s1")
-	check("its turn end taken up", []proto.Item{prompt}, proto.TurnErrorNoOutput)
+	check("its turn end taken up", []proto.Item{prompt}, a, proto.TurnErrorNoOutput)
+
+	// An interrupt that did not go out is taken back, a later one's attempt is not.
+	first := s.noteStopped("box", "s1", a)
+	time.Sleep(time.Millisecond)
+	s.noteStopped("box", "s1", a)
+	s.forgetStopAttempt("box", "s1", first)
+	s.stopTurnEnded("box", "s1", time.Now())
+	check("a later attempt stands", []proto.Item{prompt}, a, proto.TurnErrorStopped)
+	failed := s.noteStopped("box", "s1", a)
+	s.forgetStopAttempt("box", "s1", failed)
+	s.stopTurnEnded("box", "s1", time.Now())
+	check("the interrupt failed", []proto.Item{prompt}, a, proto.TurnErrorNoOutput)
+
+	// The window is the turn end's, not the look's: an end heard long after the Stop is not its; one heard in time
+	// still is, however late it is looked at.
+	q := &s.tasks.quiet
+	put := func(at, ended time.Time) {
+		q.mu.Lock()
+		q.stops[SessionRef{MachineID: "box", SessionID: "s1"}] = stopMark{at: at, stretch: a, ended: ended}
+		q.mu.Unlock()
+	}
+	old := time.Now().Add(-30 * time.Minute)
+	put(old, old.Add(stopCounts+time.Second))
+	check("ended long after the Stop", []proto.Item{prompt}, a, proto.TurnErrorNoOutput)
+	put(old, old.Add(time.Second))
+	check("ended in time, looked at late", []proto.Item{prompt}, a, proto.TurnErrorStopped)
 }
 
 // The verdict on a turn with no output outlives the manager: the ledger keeps it, and a manager started again puts it
@@ -322,16 +399,211 @@ func TestQuietTurnAfterARestart(t *testing.T) {
 }
 
 // The finished push for a turn Persona's Stop ended says so, with no ⚠️ and nothing of a model service error; one with
-// no output is pushed as interrupted, as a cut-off turn is.
+// no output is marked ⚠️ as a cut-off turn is, with the hub's sentence for it in the user's language (no Chinese prefix
+// in English or Japanese).
 func TestQuietTurnPush(t *testing.T) {
 	stopped := i18n.T(i18n.Default, "assistant-tasks.stopped_turn")
 	head, text := doneAlert(i18n.Default, proto.Session{Title: "修登录", TurnError: stopped, TurnErrorKind: proto.TurnErrorStopped})
 	if head != "修登录" || text != stopped {
 		t.Fatalf("stopped: %q %q", head, text)
 	}
-	silent := silentTurnErrorIn(i18n.Default)
-	head, text = doneAlert(i18n.Default, proto.Session{Title: "修登录", TurnError: silent, TurnErrorKind: proto.TurnErrorNoOutput})
-	if !strings.HasPrefix(head, "⚠️") || !strings.HasPrefix(text, interruptedSummary) {
-		t.Fatalf("no output: %q %q", head, text)
+	for _, l := range []i18n.Lang{i18n.Default, i18n.En, i18n.Ja} {
+		silent := silentTurnErrorIn(l)
+		head, text = doneAlert(l, proto.Session{Title: "修登录", TurnError: silent, TurnErrorKind: proto.TurnErrorNoOutput})
+		if !strings.HasPrefix(head, "⚠️") || text != silent {
+			t.Fatalf("no output in %s: %q %q", l, head, text)
+		}
+	}
+}
+
+// receiptOf is the latest receipt of task id in conv, waited for (n: how many it must have by then).
+func receiptOf(t *testing.T, s *Service, conv, id string, n int) receiptBody {
+	t.Helper()
+	var rb receiptBody
+	waitFor(t, "the receipt", func() bool {
+		items, _, _ := s.feed(context.Background(), conv, time.Time{})
+		got := 0
+		for _, it := range items {
+			if it.Kind == feedReceipt && it.Ref == id {
+				got++
+				rb = receiptBody{}
+				_ = json.Unmarshal(it.Body, &rb)
+			}
+		}
+		return got >= n
+	})
+	return rb
+}
+
+// fleetTaskStarted opens the task from conv1 on ft and has its agent s1 (rev) work: the row it works at.
+func fleetTaskStarted(t *testing.T, ft *fleetTest, rev int64) proto.Session {
+	t.Helper()
+	if _, err := ft.s.toolTaskPlan(context.Background(), "conv1", planArgs(true)); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the link", func() bool { return len(onlyTodo(ft.s).Agents) == 1 })
+	work := proto.Session{SessionID: "s1", Cwd: "/code/app", Agent: "claude", Status: proto.StatusWorking, Rev: rev, UpdatedAt: time.Now()}
+	ft.sessions("box", work)
+	waitFor(t, "the turn's start", func() bool {
+		ft.s.tasks.mu.Lock()
+		defer ft.s.tasks.mu.Unlock()
+		_, worked := ft.s.tasks.working[onlyTodo(ft.s).ID]
+		return worked
+	})
+	return work
+}
+
+// The verdict is the turn's whose transcript was read: a row that moved while the transcript was read is looked at
+// again, the row and the transcript together, and the verdict carries the row it was made at.
+func TestQuietTurnTranscriptMovesDuringTheRead(t *testing.T) {
+	old := receiptRetryAfter
+	receiptRetryAfter = 100 * time.Millisecond
+	t.Cleanup(func() { receiptRetryAfter = old })
+	ft := newFleetTaskTest(t)
+	s := ft.s
+	work := fleetTaskStarted(t, ft, 1)
+	ft.f.setItems(proto.Item{Kind: proto.KindText, Role: "user", Text: "做吧"})
+	done := work
+	done.Status, done.Rev, done.UpdatedAt = proto.StatusDone, 2, time.Now()
+	moved := done
+	moved.Rev, moved.UpdatedAt = 3, done.UpdatedAt.Add(time.Second)
+	ft.f.hookReads(receiptHooks{after: func(n int) {
+		if n == 1 {
+			ft.d.setSessions("box", []proto.Session{moved}) // written to while the first read was on its way
+		}
+	}})
+	ft.sessions("box", done)
+	rb := receiptOf(t, s, "conv1", onlyTodo(s).ID, 1)
+	if rb.Cause != causeNoOutput {
+		t.Fatalf("receipt %+v", rb)
+	}
+	if m := s.quietMarks("box")["s1"]; m.rev != 3 {
+		t.Fatalf("the verdict carries rev %d, want the row it was made at (3)", m.rev)
+	}
+	if row := listed(t, s, "box", "s1"); row.TurnErrorKind != proto.TurnErrorNoOutput {
+		t.Fatalf("row %+v", row)
+	}
+}
+
+// Without a Rev, a row is the verdict's only at its time (or a moment later) with the same last words: an older row,
+// or a next turn that came and went between two lists, is not.
+func TestQuietMarkHolds(t *testing.T) {
+	at := time.Now()
+	m := quietMark{kind: proto.TurnErrorNoOutput, seen: at, textKnown: true}
+	for _, c := range []struct {
+		name string
+		row  proto.Session
+		want bool
+	}{
+		{"the same row", proto.Session{UpdatedAt: at}, true},
+		{"its time read a moment late", proto.Session{UpdatedAt: at.Add(time.Second)}, true},
+		{"an older row", proto.Session{UpdatedAt: at.Add(-time.Second)}, false},
+		{"later", proto.Session{UpdatedAt: at.Add(quietSlack + time.Second)}, false},
+		{"a next turn's words", proto.Session{UpdatedAt: at.Add(time.Second), LastText: "好了"}, false},
+	} {
+		if got := m.holds(c.row); got != c.want {
+			t.Errorf("%s: %v", c.name, got)
+		}
+	}
+	withRev := quietMark{rev: 5, seen: at}
+	if !withRev.holds(proto.Session{Rev: 5, UpdatedAt: at.Add(time.Hour)}) || withRev.holds(proto.Session{Rev: 6, UpdatedAt: at}) {
+		t.Error("a row with a Rev is the verdict's by its Rev alone")
+	}
+}
+
+// A Stop that came while turn A worked is A's: A ending with output spends it, and a later turn B that ends with no
+// output is the model's, not stopped.
+func TestQuietTurnStopIsTheInterruptedTurns(t *testing.T) {
+	ft := newFleetTaskTest(t)
+	s, ctx := ft.s, context.Background()
+	ft.f.known["lark1"] = true
+	ft.sessions("server", proto.Session{SessionID: "conv1", Assistant: true, Status: proto.StatusIdle},
+		proto.Session{SessionID: "lark1", Assistant: true, Status: proto.StatusWorking})
+	s.markReporter(ctx, "server", "lark1")
+	if _, err := s.toolTaskPlan(ctx, "lark1", planArgs(true)); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the link", func() bool { return len(onlyTodo(s).Agents) == 1 })
+	id := onlyTodo(s).ID
+	prompt := proto.Item{Kind: proto.KindText, Role: "user", Text: "做吧"}
+	work := proto.Session{SessionID: "s1", Cwd: "/code/app", Agent: "claude", Status: proto.StatusWorking, Rev: 1, UpdatedAt: time.Now()}
+	ft.sessions("box", work)
+	waitFor(t, "turn A's start", func() bool { return !s.taskStretch(onlyTodo(s)).Equal(onlyTodo(s).CreatedAt) })
+	s.UserStopped(ctx, SessionRef{MachineID: "server", SessionID: "lark1"})
+	// A had said something by the time the Esc reached it.
+	ft.f.setItems(prompt, proto.Item{Kind: proto.KindText, Role: "assistant", Text: "看了一下，登录页在横屏时重建了"})
+	done := work
+	done.Status, done.Rev, done.UpdatedAt, done.LastText = proto.StatusDone, 2, time.Now(), "看了一下，登录页在横屏时重建了"
+	ft.sessions("box", done)
+	if rb := receiptOf(t, s, "lark1", id, 1); rb.State != "done" {
+		t.Fatalf("turn A: %+v", rb)
+	}
+
+	// Turn B, later, answers nothing: the Stop before A is not its.
+	time.Sleep(5 * time.Millisecond)
+	b := done
+	b.Status, b.Rev, b.UpdatedAt = proto.StatusWorking, 3, time.Now()
+	ft.sessions("box", b)
+	ft.f.setItems(prompt)
+	b.Status, b.Rev, b.UpdatedAt, b.LastText = proto.StatusDone, 4, time.Now(), ""
+	ft.sessions("box", b)
+	if rb := receiptOf(t, s, "lark1", id, 2); rb.Cause != causeNoOutput {
+		t.Fatalf("turn B: %+v", rb)
+	}
+	if row := listed(t, s, "box", "s1"); row.TurnErrorKind != proto.TurnErrorNoOutput {
+		t.Fatalf("row %q %q", row.TurnError, row.TurnErrorKind)
+	}
+}
+
+// A verdict written by a real turn end outlives the manager: the ledger the turn end wrote (the same write that took
+// the turn up) has it, and a manager started again on it puts it back on the row once it reads the ledger. The first
+// manager runs without a database (memStore keeps no plans): what it wrote is handed to the second as stored.
+func TestQuietTurnVerdictWrittenSurvivesARestart(t *testing.T) {
+	ft := newFleetTaskTest(t)
+	work := fleetTaskStarted(t, ft, 1)
+	ft.f.setItems(proto.Item{Kind: proto.KindText, Role: "user", Text: "做吧"})
+	done := work
+	done.Status, done.Rev, done.UpdatedAt = proto.StatusDone, 2, time.Now()
+	ft.sessions("box", done)
+	id := onlyTodo(ft.s).ID
+	if rb := receiptOf(t, ft.s, "conv1", id, 1); rb.Cause != causeNoOutput {
+		t.Fatalf("receipt %+v", rb)
+	}
+	b := &ft.s.tasks.turns
+	b.mu.Lock()
+	doc := b.doc
+	b.mu.Unlock()
+	if e := doc.Turns[id]; e.State != turnInterrupted || e.Silent != proto.TurnErrorNoOutput || e.Rev != 2 {
+		t.Fatalf("the ledger has %+v", e)
+	}
+	st := newFleetMem()
+	if err := st.PutSetting(context.Background(), taskTurnsKey, doc); err != nil {
+		t.Fatal(err)
+	}
+
+	again := New(Options{Hub: ft.f, Store: func() Store { return st }, Logf: testLogf(t), Devices: ft.d})
+	withSettings(t, ft.f, again)
+	raw, _ := json.Marshal(map[string]any{"sessions": []proto.Session{done}})
+	again.NodeEvent("box", "sessions.changed", raw)
+	if row := listed(t, again, "box", "s1"); row.TurnError != "" {
+		t.Fatalf("a verdict before the ledger was read: %q", row.TurnError)
+	}
+	if _, ok := again.turnOf(context.Background(), id); !ok {
+		t.Fatal("the ledger was not read")
+	}
+	if row := listed(t, again, "box", "s1"); row.TurnErrorKind != proto.TurnErrorNoOutput || row.TurnError != silentTurnErrorIn(i18n.Default) {
+		t.Fatalf("after the restart: %q %q", row.TurnError, row.TurnErrorKind)
+	}
+}
+
+// agents_list keeps its word for a row cut off by a model error ("done, not seen" with the error in its last words, as
+// before); only the hub's own verdicts on a turn with no output are named and filtered apart.
+func TestAgentsListLabelOfAModelError(t *testing.T) {
+	cut := proto.Session{State: proto.StateUnread, TurnError: "API Error: 529 overloaded", UpdatedAt: time.Now()}
+	if agentsListLabel(cut) != stateNames[proto.StateUnread] || agentsListState(cut) != proto.StateUnread {
+		t.Fatalf("a model error: %q %q", agentsListLabel(cut), agentsListState(cut))
+	}
+	if snapshotAgentGroup(cut, time.Now()) != snapshotAgentUnread {
+		t.Fatal("a model error moved in the snapshot")
 	}
 }

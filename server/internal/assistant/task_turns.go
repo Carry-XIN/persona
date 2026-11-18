@@ -396,11 +396,18 @@ func (s *Service) turnOf(ctx context.Context, todo string) (taskTurn, bool) {
 // no end yet and this is that turn (sameUnnamed: it gets its name now); or when no end is known now either and
 // nothing was written to the transcript since (sameRow).
 func (s *Service) takeTurn(ctx context.Context, t Todo, last proto.Session, items []proto.Item, end turnClose, named bool, since time.Time, state string) (e taskTurn, again bool) {
+	return s.takeTurnAs(ctx, t, last, items, end, named, since, state, "")
+}
+
+// takeTurnAs is takeTurn for an interrupted turn with no output (silent: its kind, silent_turns.go), kept on the ledger
+// in the same write that takes the turn up: a manager that stops between the two never has the turn without it. A
+// turn taken before without it (an older manager) gets it now.
+func (s *Service) takeTurnAs(ctx context.Context, t Todo, last proto.Session, items []proto.Item, end turnClose, named bool, since time.Time, state, silent string) (e taskTurn, again bool) {
 	if !named {
 		end = turnClose{}
 	}
 	fresh := taskTurn{Machine: last.MachineID, Session: last.SessionID, Key: end.Key, Open: turnOpen(items), Rev: last.Rev,
-		Seen: last.UpdatedAt.UTC(), State: state, Work: since.UTC(), At: time.Now().UTC()}
+		Seen: last.UpdatedAt.UTC(), State: state, Work: since.UTC(), At: time.Now().UTC(), Silent: silent}
 	b := &s.tasks.turns
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -413,6 +420,9 @@ func (s *Service) takeTurn(ctx context.Context, t Todo, last proto.Session, item
 		changed := !cur.Work.Equal(since) || cur.Rev != last.Rev
 		if named && cur.Key == "" {
 			cur.Key, cur.Open, changed = end.Key, fresh.Open, true // its name, now that the transcript has it
+		}
+		if silent != "" && cur.State == turnInterrupted && cur.Silent == "" {
+			cur.Silent, changed = silent, true
 		}
 		if changed {
 			cur.Work, cur.Rev, cur.Seen = since.UTC(), last.Rev, last.UpdatedAt.UTC() // the stretch it closes now, as the judgment and the signals name it

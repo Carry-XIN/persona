@@ -675,8 +675,9 @@ private fun InterruptedReceipt(item: FeedItem, host: AssistantTaskHost, todos: L
     val busy by host.tasks.busy.collectAsStateWithLifecycle()
     val cut = todo?.let { Interruption.of(host.tasks.lead(it, host.sessions)) }
     val reason = cut?.reason ?: ApiErrorInfo.parse(item.field("error") ?: item.field("summary"))?.reason
-    // A turn with no output (#10187): the hub's own sentence, from the lead's row, or the receipt's for Persona's Stop.
-    val plain = cut?.takeIf { it.plain }?.reason?.text() ?: item.field("error")?.takeIf { item.field("cause") == "stopped" }
+    // A turn with no output (#10187): the hub's own sentence, from the lead's row, or the receipt's (its cause says so)
+    // when the row is not at hand: never "Model service error".
+    val plain = cut?.takeIf { it.plain }?.reason?.text() ?: item.field("error")?.takeIf { item.field("cause") in silentCauses }
     val tone = PersonaTheme.palette.danger
     Row(Modifier.fillMaxWidth().clip(PersonaTheme.shapes.cardShape).background(PersonaTheme.palette.statusSurface).padding(Tokens.Space.l),
         horizontalArrangement = Arrangement.spacedBy(Tokens.Space.m)) {
@@ -704,6 +705,9 @@ private fun resolutionLabel(r: InterruptResolution): String = stringResource(whe
     InterruptResolution.Accepted -> R.string.chat_tasks_interrupt_accepted
     InterruptResolution.Done -> R.string.chat_tasks_interrupt_done
 })
+
+/** The receipt causes of a turn with no output (#10187), whose `error` is the hub's own sentence for it. */
+private val silentCauses = setOf("no_output", "stopped")
 
 /** What cut a batch off (the hub's `cause`); one this build doesn't know reads as a model service error. */
 @Composable

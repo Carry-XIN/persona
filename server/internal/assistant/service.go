@@ -828,6 +828,7 @@ func (s *Service) TurnEnded(ctx context.Context, r SessionRef) {
 // turnEnded is TurnEnded; meeting: the turn was a meeting's batch's (meeting_turns.go), a side exchange that is
 // neither a task's progress nor triaged, mirrored or a reason to name the conversation.
 func (s *Service) turnEnded(ctx context.Context, r SessionRef, meeting bool) {
+	s.stopTurnEnded(r.MachineID, r.SessionID, time.Now()) // the turn a Stop interrupted, if one did (silent_turns.go)
 	s.clearToolLoop([2]string{r.MachineID, r.SessionID}, loopTurnChanged)
 	go s.registerInlineTurn(context.WithoutCancel(ctx), r)
 	if !meeting {

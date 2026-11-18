@@ -1,7 +1,6 @@
 package assistant
 
 import (
-	"context"
 	"sync"
 	"time"
 
@@ -18,17 +17,22 @@ import (
 // and the apps then read it as they read a turn the model service cut off, interrupted with a "Continue".
 //
 // A turn Persona's own Stop interrupted before it had any output (stopReporting: the owner stopped the conversation
-// that handed the task out) is stopped, not a failure of the model service: stopReporting notes the agents it
-// interrupts, and a turn of one with no output that ends soon after reads TurnErrorStopped, with a receipt that says
-// it was stopped.
+// that handed the task out) is stopped, not a failure of the model service: stopReporting notes each agent it
+// interrupts with the task's stretch of work it ran in (the turn the Stop was sent to), and the hub notes when it next
+// hears that agent's turn end. A silent end of that same stretch, heard after the Stop, reads TurnErrorStopped, with a
+// receipt that says it was stopped. A turn that ended before the Stop was sent, or a later one, does not.
 
-// quietSlack is how much later than the verdict's a row's time may be and still be the same turn: a node's lists can
-// carry a later UpdatedAt for a transcript that did not change (lookOf, task_turns.go).
-const quietSlack = 5 * time.Second
+// quietSlack is how much later than the verdict's a row's time may be and still be the same turn, where the node gives
+// no Rev: its lists can carry a later UpdatedAt for a transcript that did not change (lookOf, task_turns.go), as
+// agentState allows for.
+const quietSlack = 2 * time.Second
 
-// stopCounts is how long after Persona's Stop interrupted an agent a turn of it with no output is taken as stopped by
-// it. The interrupt ends the turn at once; the turn's end is read within seconds of it.
+// stopCounts is how long after Persona's Stop the interrupted turn's end may be heard and still be taken as the Stop's.
+// The interrupt ends the turn at once; the end is heard within seconds of it.
 const stopCounts = 10 * time.Minute
+
+// stopKeep is how long a Stop is kept for the turn end it is waiting for to be taken up (its settle, a retry).
+const stopKeep = time.Hour
 
 // quietMarkKeep is how long a verdict is kept for an agent that never works again.
 const quietMarkKeep = 14 * 24 * time.Hour
@@ -37,25 +41,37 @@ const quietMarkKeep = 14 * 24 * time.Hour
 type quietTurns struct {
 	mu    sync.Mutex
 	marks map[SessionRef]quietMark
-	stops map[SessionRef]time.Time // the agents stopReporting interrupted, and when
+	stops map[SessionRef]stopMark // the agents stopReporting interrupted
 }
 
-// quietMark: the turn of an agent that ended at its row (rev, seen) had no output; kind is proto.TurnErrorNoOutput or
-// proto.TurnErrorStopped.
+// stopMark: Persona's Stop was sent to an agent at at, while it worked on its task's stretch of work that began at
+// stretch (the task's working time, or its creation when no start was heard: settleTurn's since). ended: when the hub
+// next heard a turn of it end (zero: not yet).
+type stopMark struct {
+	at, stretch, ended time.Time
+}
+
+// quietMark: the turn of an agent that ended at its row (rev, seen, and its last words text where known) had no
+// output; kind is proto.TurnErrorNoOutput or proto.TurnErrorStopped.
 type quietMark struct {
-	kind string
-	rev  int64
-	seen time.Time
-	at   time.Time
+	kind      string
+	rev       int64
+	seen      time.Time
+	text      string
+	textKnown bool // the ledger keeps no words: a verdict it restored has none to go by
+	at        time.Time
 }
 
-// holds: c is still the row the verdict was made at: nothing written to its transcript since (its Rev, or its time
-// where the node gives no Rev).
+// holds: c is still the row the verdict was made at: nothing written to its transcript since. Its Rev says so where
+// both have one; else its time, no earlier and at most quietSlack later, with the same last words.
 func (m quietMark) holds(c proto.Session) bool {
 	if m.rev != 0 && c.Rev != 0 {
 		return c.Rev == m.rev
 	}
-	return !c.UpdatedAt.After(m.seen.Add(quietSlack))
+	if c.UpdatedAt.Before(m.seen) || c.UpdatedAt.After(m.seen.Add(quietSlack)) {
+		return false
+	}
+	return !m.textKnown || c.LastText == m.text
 }
 
 // quietTurnText is the turn error a row with verdict kind shows, in l.
@@ -69,7 +85,7 @@ func quietTurnText(l i18n.Lang, kind string) string {
 // markQuietTurn keeps that agent c's turn, ending at this row, had no output (kind), and has the apps told the row.
 func (s *Service) markQuietTurn(c proto.Session, kind string) {
 	s.putQuietMarks(map[SessionRef]quietMark{{MachineID: c.MachineID, SessionID: c.SessionID}: {kind: kind, rev: c.Rev,
-		seen: c.UpdatedAt, at: time.Now()}})
+		seen: c.UpdatedAt, text: c.LastText, textKnown: true, at: time.Now()}})
 	s.publishSessions(c.MachineID)
 }
 
@@ -129,31 +145,60 @@ func putQuietTurn(c *proto.Session, marks map[string]quietMark, l i18n.Lang) {
 	c.TurnError, c.TurnErrorKind = quietTurnText(l, m.kind), m.kind
 }
 
-// noteStopped: Persona's Stop interrupted agent sid on machine (stopReporting).
-func (s *Service) noteStopped(machine, sid string) {
+// noteStopped: Persona's Stop is being sent to agent sid on machine, which works on its task's stretch of work that
+// began at stretch (stopReporting). The answer is the attempt, for forgetStopAttempt when the interrupt failed.
+func (s *Service) noteStopped(machine, sid string, stretch time.Time) time.Time {
 	q := &s.tasks.quiet
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.stops == nil {
-		q.stops = map[SessionRef]time.Time{}
+		q.stops = map[SessionRef]stopMark{}
 	}
 	now := time.Now()
-	for ref, at := range q.stops {
-		if now.Sub(at) > stopCounts {
+	for ref, m := range q.stops {
+		if now.Sub(m.at) > stopKeep {
 			delete(q.stops, ref)
 		}
 	}
-	q.stops[SessionRef{MachineID: machine, SessionID: sid}] = now
+	q.stops[SessionRef{MachineID: machine, SessionID: sid}] = stopMark{at: now, stretch: stretch}
+	return now
 }
 
-// stoppedByPersona: Persona's Stop interrupted agent sid on machine less than stopCounts ago, and no turn end of it
-// was taken up since (forgetStop).
-func (s *Service) stoppedByPersona(machine, sid string) bool {
+// forgetStopAttempt: the Stop sent at at to agent sid on machine did not go out: it is taken back, unless a later one
+// took its place.
+func (s *Service) forgetStopAttempt(machine, sid string, at time.Time) {
 	q := &s.tasks.quiet
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	at, ok := q.stops[SessionRef{MachineID: machine, SessionID: sid}]
-	return ok && time.Since(at) <= stopCounts
+	ref := SessionRef{MachineID: machine, SessionID: sid}
+	if m, ok := q.stops[ref]; ok && m.at.Equal(at) {
+		delete(q.stops, ref)
+	}
+}
+
+// stopTurnEnded: the hub heard a turn of agent sid on machine end (turnEnded): the first end after a Stop is the
+// interrupted turn's, as far as the hub can tell.
+func (s *Service) stopTurnEnded(machine, sid string, now time.Time) {
+	q := &s.tasks.quiet
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	ref := SessionRef{MachineID: machine, SessionID: sid}
+	if m, ok := q.stops[ref]; ok && m.ended.IsZero() && !now.Before(m.at) {
+		m.ended = now
+		q.stops[ref] = m
+	}
+}
+
+// stoppedByPersona: Persona's Stop interrupted agent sid on machine in the task's stretch of work that began at
+// stretch, and the hub heard that turn end after the Stop, within stopCounts of it. A turn end heard before the Stop
+// was sent (the turn ended by itself), a later stretch's (another turn), and a turn end taken up since (forgetStop)
+// are not the Stop's.
+func (s *Service) stoppedByPersona(machine, sid string, stretch time.Time) bool {
+	q := &s.tasks.quiet
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	m, ok := q.stops[SessionRef{MachineID: machine, SessionID: sid}]
+	return ok && m.stretch.Equal(stretch) && !m.ended.IsZero() && m.ended.Sub(m.at) <= stopCounts
 }
 
 // forgetStop: a turn end of agent sid on machine was taken up (a receipt): the Stop before it is spent on that turn.
@@ -162,6 +207,17 @@ func (s *Service) forgetStop(machine, sid string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	delete(q.stops, SessionRef{MachineID: machine, SessionID: sid})
+}
+
+// taskStretch is when task t's current stretch of work began, as settleTurn counts it (its since): when one of its
+// agents last started a turn, or its creation when no start was heard (a hub restarted since).
+func (s *Service) taskStretch(t Todo) time.Time {
+	s.tasks.mu.Lock()
+	defer s.tasks.mu.Unlock()
+	if since, ok := s.tasks.working[t.ID]; ok {
+		return since
+	}
+	return t.CreatedAt
 }
 
 // restoreQuietTurns puts the verdicts the ledger kept back on the rows (turnsLocked, once it is read): a manager
@@ -185,20 +241,4 @@ func (s *Service) restoreQuietTurns(turns map[string]taskTurn) {
 			s.publishSessions(m)
 		}
 	}()
-}
-
-// turnQuiet keeps on the ledger that todo's turn, taken up as interrupted, had no output (kind): the verdict outlives
-// this manager (restoreQuietTurns).
-func (s *Service) turnQuiet(ctx context.Context, todo, kind string) {
-	b := &s.tasks.turns
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if !b.loaded {
-		return
-	}
-	if e, ok := b.doc.Turns[todo]; ok && e.State == turnInterrupted && e.Silent != kind {
-		e.Silent = kind
-		b.doc.Turns[todo] = e
-		s.saveTurnsLocked(ctx)
-	}
 }

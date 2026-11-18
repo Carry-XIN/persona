@@ -904,12 +904,26 @@ func (s *Service) continueTask(ctx context.Context, cur Todo) (json.RawMessage, 
 			// Still cut off by the same error: not taken up yet. The session is as the node lists it: Claude Code's error
 			// is its last words, a Codex turn's the node's own TurnError (no words of its answer, #2185).
 			c, ok := s.session(ctx, cut.MachineID, cut.SessionID)
-			if !ok || c.Status == proto.StatusWorking || (strings.TrimSpace(c.LastText) != cut.TurnError && c.TurnError != cut.TurnError) {
+			if !ok || c.Status == proto.StatusWorking || continueTakenUp(c, cut) {
 				return // it took it up (or is gone): a later cut may be continued again
 			}
 		}
 	}()
 	return s.todoView(ctx, cur.ID)
+}
+
+// continueTakenUp: agent c (as session.get answers it: the node's row) is no longer at cut, the turn "Continue" was
+// sent for. The hub's own word on a turn with no output (silent_turns.go) is not on the node's row: that turn is over
+// once its transcript moved (another Rev, or another time where the node gives none). Otherwise the error that cut it
+// off is gone: Claude Code's is its last words, a Codex turn's the node's own TurnError (#2185).
+func continueTakenUp(c, cut proto.Session) bool {
+	if proto.SilentTurnKind(cut.TurnErrorKind) {
+		if c.Rev != 0 || cut.Rev != 0 {
+			return c.Rev != cut.Rev
+		}
+		return !c.UpdatedAt.Equal(cut.UpdatedAt)
+	}
+	return strings.TrimSpace(c.LastText) != cut.TurnError && c.TurnError != cut.TurnError
 }
 
 // taskStartRetryDelay is how long a task waits before its one retry after a start the new tab's terminal was not

@@ -501,11 +501,27 @@ func (t *tracker) waitOutside(r *voiceRun, w *proto.WorkState) {
 	}
 }
 
+// turnFailed: s's last turn ended on an error, not on Persona's own Stop (the hub's TurnErrorStopped, #10187: the owner
+// stopped the conversation that handed the task out, which is no failure of the model service).
+func turnFailed(s *proto.Session) bool {
+	return strings.TrimSpace(s.TurnError) != "" && s.TurnErrorKind != proto.TurnErrorStopped
+}
+
+// stopOf is why s's last turn stopped when its items do not say (channel.Reading.Stopped): Persona's Stop reads as the
+// interrupted notice the user's own Esc writes (EndStopped), anything else as its error (a Codex turn the model service
+// failed writes no line of it).
+func stopOf(s *proto.Session) string {
+	if s.TurnErrorKind == proto.TurnErrorStopped && strings.TrimSpace(s.TurnError) != "" {
+		return transcript.InterruptedNotice
+	}
+	return channel.StopReason(s.TurnError)
+}
+
 // failureOf is the sort of model error s's last turn ended on (prompts.VoiceReport.Failure), "" none: what is wrong
 // when the hub can tell, never the error's text (it may say what the service runs on). A transient one is retried
-// when a "Continue" was seen and it failed again.
+// when a "Continue" was seen and it failed again. Persona's own Stop is none.
 func (r *voiceRun) failureOf(s *proto.Session) string {
-	if strings.TrimSpace(s.TurnError) == "" {
+	if !turnFailed(s) {
 		return ""
 	}
 	switch s.TurnErrorCode {

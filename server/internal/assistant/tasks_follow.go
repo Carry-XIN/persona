@@ -315,21 +315,34 @@ type receiptReview struct {
 // interruptedSummary is an interrupted task's receipt: the error itself is no conclusion (#1516).
 const interruptedSummary = assistantwire.InterruptedSummary
 
-// quietTurnKind is what agent sid on machine's turn, read as items, is when it had no output at all:
-// proto.TurnErrorStopped when Persona's Stop interrupted it (stopReporting), proto.TurnErrorNoOutput when nothing did
+// quietTurnKind is what agent sid on machine's turn, read as items, in the task's stretch of work since since, is when
+// it had no output at all: proto.TurnErrorStopped when Persona's Stop interrupted that turn (stopReporting,
+// stoppedByPersona), proto.TurnErrorNoOutput when nothing did
 // (silentTurn). "" for a turn with output, one the user stopped themselves (Esc: theirs to go on with), or one that
 // could not be read.
-func (s *Service) quietTurnKind(machine, sid string, items []proto.Item) string {
+func (s *Service) quietTurnKind(machine, sid string, items []proto.Item, since time.Time) string {
 	none, userStopped := turnWithoutOutput(items)
 	switch {
 	case !none:
 		return ""
-	case s.stoppedByPersona(machine, sid):
+	case s.stoppedByPersona(machine, sid, since):
 		return proto.TurnErrorStopped // Claude Code may write the interrupted notice for Persona's Esc, or nothing
 	case userStopped:
 		return ""
 	}
 	return proto.TurnErrorNoOutput
+}
+
+// sameTurnRow: now is agent row last still, stopped: nothing was written to its transcript since (the same Rev, or the
+// same time where the node gives no Rev).
+func sameTurnRow(now, last proto.Session) bool {
+	if now.Status == proto.StatusWorking || now.Starting {
+		return false
+	}
+	if now.Rev != 0 || last.Rev != 0 {
+		return now.Rev == last.Rev
+	}
+	return now.UpdatedAt.Equal(last.UpdatedAt)
 }
 
 // silentTurnErrorIn is the interrupted receipt's detail for a turn with no output at all (silentTurn, #2349), in l.
@@ -455,7 +468,7 @@ func (s *Service) settleTurn(ctx context.Context, machine, sid, unheard string) 
 		if _, closed := turnEndOf(items); !closed {
 			return settleLater // it went on since the sweep read it
 		}
-		if cut.SessionID == "" && taskTurnAwaitingAnswer(items) && s.quietTurnKind(last.MachineID, last.SessionID, items) == "" {
+		if cut.SessionID == "" && taskTurnAwaitingAnswer(items) && s.quietTurnKind(last.MachineID, last.SessionID, items, s.taskStretch(t)) == "" {
 			return settleHeld // stopped between its tools and its answer: held as below, with no start taken for it
 		}
 		if !heard {
@@ -503,7 +516,7 @@ func (s *Service) settleTurn(ctx context.Context, machine, sid, unheard string) 
 	end, named := turnEndOf(items)
 	quiet := "" // the turn had no output: proto.TurnErrorNoOutput, or proto.TurnErrorStopped (silent_turns.go)
 	if read {
-		quiet = s.quietTurnKind(last.MachineID, last.SessionID, items)
+		quiet = s.quietTurnKind(last.MachineID, last.SessionID, items, since)
 	}
 	if cut.SessionID != "" {
 		s.forgetStop(last.MachineID, last.SessionID)
@@ -545,12 +558,18 @@ func (s *Service) settleTurn(ctx context.Context, machine, sid, unheard string) 
 		return settleLater
 	}
 	if quiet != "" {
+		// The verdict is the turn's that was read: the row must not have moved while its transcript was (the row was
+		// taken before the read). Moved, it is looked at again, the row and the transcript read together.
+		if now, ok := s.session(cctx, last.MachineID, last.SessionID); !ok || !sameTurnRow(now, last) {
+			s.releaseReceipt(ctx, t.ID, machine, sid, reserved)
+			return settleLater
+		}
 		s.forgetStop(last.MachineID, last.SessionID)
-		if _, again := s.takeTurn(cctx, t, last, items, end, named, since, turnInterrupted); again {
+		// The ledger keeps the verdict with the turn, for a manager started again (silent_turns.go).
+		if _, again := s.takeTurnAs(cctx, t, last, items, end, named, since, turnInterrupted, quiet); again {
 			return settleTaken // this very turn was taken up before: no second receipt
 		}
-		// The Agent's row says so too, not "done" (#10187); the ledger keeps it for a manager started again.
-		s.turnQuiet(cctx, t.ID, quiet)
+		// The Agent's row says so too, not "done" (#10187).
 		s.markQuietTurn(last, quiet)
 		l := s.lang(cctx)
 		if quiet == proto.TurnErrorStopped {
