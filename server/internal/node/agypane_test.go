@@ -412,6 +412,12 @@ func TestAgyPaneResumeBackfillTracksConversation(t *testing.T) {
 	const model = "test-model"
 	n.noteWorkAgent(context.Background(), n.hosts.Get(host.Herdr).(*herdrHost), agyTestPane, agyTestRow, home, agyAgent, agyAgent, model)
 	assertAgyResumeReport(t, f, 0, model, agyTestID)
+	n.mu.Lock()
+	kept := n.launches[agyTestPane].AgyConversation
+	n.mu.Unlock()
+	if kept != agyTestID { // what was reported is what the launch keeps (review on #10364)
+		t.Fatalf("launch keeps conversation %q, reported %q", kept, agyTestID)
+	}
 
 	second := agyTestAgent(agyTestPane, home, agyOtherTestID)
 	f.reply("session.snapshot", snapshot(nil, nil, []any{second}, nil))

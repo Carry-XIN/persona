@@ -301,6 +301,11 @@ func agyTool(name string, raw json.RawMessage) (string, json.RawMessage) {
 		appName = name
 	}
 	if raw = bytes.TrimSpace(raw); len(raw) > 0 && raw[0] == '[' {
+		// Kept as an array, as the companion does; one too long to send is bounded like any other input, under "args".
+		wrapped := append(append([]byte(`{"args":`), raw...), '}')
+		if clipped := transcript.ClipToolInput(wrapped); len(clipped) < len(wrapped) {
+			return appName, clipped
+		}
 		return appName, raw
 	}
 	var args map[string]any

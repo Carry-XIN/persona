@@ -178,6 +178,12 @@ func (n *Node) reportResume(ctx context.Context, h *herdrHost, pane string, spec
 		if spec.AgyConversation != "" {
 			reportID = spec.AgyConversation
 		}
+		if cur, ok := n.launches[pane]; ok && cur.ID == spec.ID {
+			// What is reported is what the pane resumes: kept, so the server is recorded below and backfill does not
+			// report the same conversation again.
+			cur.AgyConversation = spec.AgyConversation
+			n.launches[pane] = cur
+		}
 	}
 	n.mu.Unlock()
 	argv, ok := n.agentResumeArgv(spec, spec.ID)

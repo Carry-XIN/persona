@@ -1,7 +1,9 @@
 package node
 
 import (
+	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -118,5 +120,17 @@ func TestAgyUserText(t *testing.T) {
 		if got := agyUserText(tc.input); got != tc.want {
 			t.Errorf("agyUserText(%q) = %q, want %q", tc.input, got, tc.want)
 		}
+	}
+}
+
+// Array tool arguments are bounded like any other tool input (review on #10364).
+func TestAgyToolArrayArgsAreClipped(t *testing.T) {
+	big := `["` + strings.Repeat("x", 1<<20) + `"]`
+	_, input := agyTool("view_file", json.RawMessage(big))
+	if len(input) >= len(big) {
+		t.Fatalf("array input not clipped: %d bytes", len(input))
+	}
+	if _, small := agyTool("view_file", json.RawMessage(`[1,2]`)); string(small) != `[1,2]` {
+		t.Fatalf("small array changed: %s", small)
 	}
 }
