@@ -61,15 +61,16 @@ func (n *Node) agyConversation(id, pane string) string {
 	return n.agyConversationLocked(id, pane)
 }
 
-func agyNotice(id string, lang i18n.Lang) agyHistory {
+// agyNotice is a pane's history while its conversation is not known: one notice, in the node's own language like its
+// other lines (one watch serves every client of the session); the hub says it in each client's (transcript_text.go).
+func agyNotice(id string) agyHistory {
 	return agyHistory{token: "agy-pane:" + id, seq: 1, items: []proto.Item{{
-		ID: "agy#0", Seq: 1, Role: "system", Kind: "notice", Text: i18n.T(lang, "node-engine.agy_pane_integration"), TS: time.Now().UTC(),
+		ID: "agy#0", Seq: 1, Role: "system", Kind: "notice", Text: i18n.T(i18n.Default, "node-engine.agy_pane_integration"), TS: time.Now().UTC(),
 	}}}
 }
 
 type agyWatch struct {
 	pane, history, conversation string
-	lang                        i18n.Lang
 	since                       int
 	file                        os.FileInfo
 }
@@ -237,16 +238,15 @@ func (n *Node) agyPaneCall(ctx context.Context, method, id, pane string, raw jso
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return nil, err, true
 	}
-	lang := i18n.From(ctx)
 	if method == "session.watch" {
-		n.watchAgyPane(rpc.ConnContext(ctx), id, pane, p.SinceSeq, lang)
+		n.watchAgyPane(rpc.ConnContext(ctx), id, pane, p.SinceSeq)
 		return okResult(nil), nil, true
 	}
 
 	mu := n.pushLock(id)
 	mu.Lock()
 	defer mu.Unlock()
-	h := agyNotice(id, lang)
+	h := agyNotice(id)
 	conversation := n.agyConversation(id, pane)
 	if conversation != "" {
 		h = agyHistory{token: "agy-pane:" + conversation + ":steps"}
@@ -277,7 +277,7 @@ func (n *Node) agyPaneCall(ctx context.Context, method, id, pane string, raw jso
 			}
 		}
 		if n.agyConversation(id, pane) != conversation {
-			h = agyNotice(id, lang)
+			h = agyNotice(id)
 		}
 	}
 	if method == "session.item" {
@@ -286,14 +286,14 @@ func (n *Node) agyPaneCall(ctx context.Context, method, id, pane string, raw jso
 	return h.page(p), nil, true
 }
 
-func (n *Node) watchAgyPane(parent context.Context, id, pane string, since int, lang i18n.Lang) {
+func (n *Node) watchAgyPane(parent context.Context, id, pane string, since int) {
 	n.mu.Lock()
 	if cur := n.watches[id]; cur != nil {
 		n.mu.Unlock()
 		return
 	}
 	ctx, cancel := context.WithCancel(parent)
-	w := &watch{cancel: cancel, ctx: ctx, parent: parent, id: id, agy: &agyWatch{pane: pane, since: since, lang: lang}}
+	w := &watch{cancel: cancel, ctx: ctx, parent: parent, id: id, agy: &agyWatch{pane: pane, since: since}}
 	n.watches[id] = w
 	if !n.pumping {
 		n.pumping = true
@@ -313,7 +313,7 @@ func (n *Node) pollAgyPane(w *watch) {
 		return
 	}
 	a := w.agy
-	h := agyNotice(w.id, a.lang)
+	h := agyNotice(w.id)
 	conversation := n.agyConversation(w.id, a.pane)
 	var info os.FileInfo
 	if conversation != "" {

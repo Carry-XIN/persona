@@ -208,6 +208,36 @@ func TestAgyPaneConversationIsolation(t *testing.T) {
 	}
 }
 
+// A watch from the end of the history, then a step that maps to no item, then a visible one: the empty step moves the
+// cursor once, and the visible one comes as its own batch, nothing sent twice (review on #10364).
+func TestAgyPaneWatchFromTheEndPastAnInvisibleStep(t *testing.T) {
+	n, f, home := herdrNode(t)
+	t.Setenv("ANTIGRAVITY_CLI_CONFIG_DIR", "")
+	seedAgents(t, n, f, agyTestAgent(agyTestPane, home, agyTestID))
+	file := agyTestFile(t, n.agyDataRoot(), agyTestID, `{"step_index":0,"type":"USER_INPUT","source":"USER_EXPLICIT","content":"Check the files"}`+"\n"+
+		`{"step_index":1,"type":"PLANNER_RESPONSE","content":"Looking"}`+"\n")
+	_, page := agyTestItems(t, n, agyTestRow, nil)
+	hub := withHub(t, n)
+	agyTestCall(t, n, "session.watch", agyTestRow, map[string]any{"since_seq": page["to_seq"]})
+	t.Cleanup(func() { n.unwatch(agyTestRow) })
+	n.mu.Lock()
+	w := n.watches[agyTestRow]
+	n.mu.Unlock()
+
+	agyTestAppend(t, file, `{"step_index":2,"type":"USER_INPUT","source":"SYSTEM","content":"hidden"}`+"\n")
+	for range 3 {
+		n.pollAgyPane(w)
+	}
+	if got := hub.spans(); len(got) != 1 || got[0].n != 0 || got[0].fromSeq != 2 || got[0].toSeq != 3 {
+		t.Fatalf("after the invisible step: %+v", got)
+	}
+	agyTestAppend(t, file, `{"step_index":3,"type":"PLANNER_RESPONSE","content":"Visible"}`+"\n")
+	waitFor(t, "the visible step", func() bool { return len(hub.spans()) >= 2 })
+	if got := hub.spans(); len(got) != 2 || got[1].n != 1 || got[1].fromSeq != 3 || got[1].toSeq != 4 || hub.got()[0].Text != "Visible" {
+		t.Fatalf("after the visible step: %+v, items %+v", got, hub.got())
+	}
+}
+
 func TestAgyPaneWatchAppendPartialAndRewrites(t *testing.T) {
 	n, f, home := herdrNode(t)
 	t.Setenv("ANTIGRAVITY_CLI_CONFIG_DIR", "")
@@ -314,7 +344,7 @@ func TestAgyPaneWatchConversationIsolation(t *testing.T) {
 	agyTestCall(t, n, "session.watch", agyTestRow, map[string]any{"since_seq": page["to_seq"]})
 	t.Cleanup(func() { n.unwatch(agyTestRow) })
 	const noticeKey = "node-engine.agy_pane_integration"
-	noticeText := i18n.T(i18n.En, noticeKey)
+	noticeText := i18n.T(i18n.Default, noticeKey) // the node's own language; the hub says it in each client's
 	noticeToken := "agy-pane:" + agyTestRow
 	firstToken := page["history"].(string)
 	for i, tc := range []struct {
