@@ -568,8 +568,13 @@ func (s *Service) settleTurn(ctx context.Context, machine, sid, unheard string) 
 		}
 		s.forgetStop(last.MachineID, last.SessionID, stop)
 		// The ledger keeps the verdict with the turn, for a manager started again (silent_turns.go).
-		if _, again := s.takeTurnAs(cctx, t, last, items, end, named, since, turnInterrupted, quiet); again {
-			return settleTaken // this very turn was taken up before: no second receipt
+		if e, again := s.takeTurnAs(cctx, t, last, items, end, named, since, turnInterrupted, quiet); again {
+			// This very turn was taken up before: no second receipt. Its verdict is on the row all the same, where the
+			// ledger has it (just put there for a turn taken without it) and the row does not show it yet.
+			if m, ok := s.quietMarks(last.MachineID)[last.SessionID]; e.Silent != "" && (!ok || !m.holds(last)) {
+				s.markQuietTurn(last, e.Silent)
+			}
+			return settleTaken
 		}
 		// The Agent's row says so too, not "done" (#10187).
 		s.markQuietTurn(last, quiet)
