@@ -101,7 +101,13 @@ func (s *Service) conclusionCard(ctx context.Context, t Todo, a acceptAsk) *feis
 	if r := recommendText(l, &a); r != "" {
 		c.Markdown(feishubot.EscapeMarkdown(r))
 	}
-	// The criteria and how each ended stay on the task's page, not on the card (#10380): the card leads with the result.
+	// The criteria and how each ended stay on the task's page, not on the card (#10380): the card leads with the result,
+	// and names only what was not met, so a shortfall is never hidden behind "Done".
+	if a.Outcome != outcomeDecide {
+		if line := notMetLine(l, s.resultOfTodo(t.ID)); line != "" {
+			c.Markdown(line)
+		}
+	}
 	if d := deadlineText(l, s.location(ctx), a.Deadline, a.Reversible, time.Now()); d != "" && decideAsk(&a) && a.AcceptedAt.IsZero() && a.AgentReply == nil {
 		c.Markdown(feishubot.EscapeMarkdown(d))
 	}

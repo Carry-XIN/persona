@@ -671,10 +671,11 @@ Two more places concern the criteria (`server/internal/assistant/task_brief_resu
   the ledger no longer lists (from the brief's log). At
   most 8; `criteria_more` counts the rest. Absent for a to-do without a brief or criteria (no brief is made for a
   receipt), so a receipt from before reads as it did. `review {state, criteria}` (the count) is unchanged.
-- **The conclusion card** (`docs/extensions/bots.md`, "Conclusions") does not list them (#10380): it leads with the
-  verdict and the result, and the task's page keeps every criterion with its result, the dropped ones with their scope
-  change, and what was done beyond the brief (the brief's recorded `result`, the review's own checks at the moment the
-  work ended, which is also what the briefing tells).
+- **The conclusion card** (`docs/extensions/bots.md`, "Conclusions") names only the criteria the work did not meet
+  (#10380): one **Not met** line on a done or cannot-be-done conclusion, the first three and how many more, nothing when
+  every one was met or only some were not checked, and nothing on a decision. The task's page keeps every criterion
+  with its result, the dropped ones with their scope change, and what was done beyond the brief (the brief's recorded
+  `result`, the review's own checks at the moment the work ended, which is also what the briefing tells).
 
 **The briefing.** The morning and evening routines' facts (`docs/assistant/assistant.md`, "Scheduled tasks") list, from
 the briefs: for each open piece of work that needs the owner, is overdue, or whose scope changed since the last

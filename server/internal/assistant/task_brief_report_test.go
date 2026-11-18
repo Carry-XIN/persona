@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nwverse/persona/server/internal/i18n"
 	"github.com/nwverse/persona/server/internal/proto"
 )
 
@@ -57,9 +58,39 @@ func TestReceiptListsTheBriefsCriteria(t *testing.T) {
 			t.Errorf("card lists the criteria (%q):\n%s", unwanted, card)
 		}
 	}
-	if brief, ok := s.briefOfTodo(todo.ID); !ok || brief.Result == nil || len(brief.Result.Criteria) != 2 ||
+	if strings.Contains(card, "未达成") {
+		t.Errorf("every criterion was met, yet the card names a shortfall:\n%s", card)
+	}
+	if brief, ok := s.briefOfTodo(todo.ID); !ok || brief.Result == nil || brief.Result.Todo != todo.ID || len(brief.Result.Criteria) != 2 ||
 		brief.Result.Criteria[0].State != criterionMet || brief.Result.Criteria[1].State != criterionMet ||
 		len(brief.Result.AlsoDone) != 1 {
 		t.Fatalf("the task's result was not kept for its page: %+v", brief.Result)
+	}
+	// A decision's card is about what to choose: it names no result.
+	if a := askOf(s, todo.ID); a != nil {
+		decide := *a
+		decide.Outcome = outcomeDecide
+		if raw, _ := json.Marshal(s.conclusionCard(ctx, todoNow(s, todo.ID), decide)); strings.Contains(string(raw), "PR 合并到 master") {
+			t.Errorf("a decision's card lists the result:\n%s", raw)
+		}
+	}
+}
+
+// The card's one line for a shortfall: only criteria not met, the first three and how many more; nothing when all
+// were met or only some were not checked (#10380).
+func TestNotMetLine(t *testing.T) {
+	r := &BriefResult{Criteria: []BriefCriterion{{Criterion: "PR merged", State: criterionMet},
+		{Criterion: "a test covers it", State: criterionNotMet}, {Criterion: "changelog", State: criterionUnchecked}}}
+	if got, want := notMetLine(i18n.En, r), "**Not met**: a test covers it"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	for _, c := range []string{"b", "c", "d", "e"} {
+		r.Criteria = append(r.Criteria, BriefCriterion{Criterion: c, State: criterionNotMet})
+	}
+	if got, want := notMetLine(i18n.En, r), "**Not met**: a test covers it; b; c and 2 more"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	if notMetLine(i18n.En, nil) != "" || notMetLine(i18n.En, &BriefResult{Criteria: []BriefCriterion{{Criterion: "x", State: criterionUnchecked}}}) != "" {
+		t.Fatal("a line with nothing missed")
 	}
 }

@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/nwverse/persona/server/internal/db"
+	"github.com/nwverse/persona/server/internal/feishubot"
+	"github.com/nwverse/persona/server/internal/i18n"
 )
 
 // ---- the result against the brief (#3822) ----
@@ -137,4 +139,36 @@ func (s *Service) briefCriteriaNow(t Todo) []BriefCriterion {
 		list = append(list, row)
 	}
 	return append(list, (&taskBrief{rec: brief.briefRecord, st: briefState{Log: brief.Log}}).dropped()...)
+}
+
+// resultOfTodo is how to-do id's work ended against its brief; nil while it has not, and for a to-do a later one took
+// the work over from (the result is that one's).
+func (s *Service) resultOfTodo(id string) *BriefResult {
+	brief, ok := s.briefOfTodo(id)
+	if !ok || brief.Result == nil || brief.Result.Todo != id || len(brief.Result.Criteria) == 0 {
+		return nil
+	}
+	return brief.Result
+}
+
+// notMetLine is the conclusion card's one line for the criteria the work did not meet, in language l (the first three,
+// then how many more); "" when none was missed.
+func notMetLine(l i18n.Lang, r *BriefResult) string {
+	if r == nil {
+		return ""
+	}
+	var missed []string
+	for _, c := range r.Criteria {
+		if c.State == criterionNotMet {
+			missed = append(missed, feishubot.EscapeMarkdown(clip(oneLine(c.Criterion), 60)))
+		}
+	}
+	if len(missed) == 0 {
+		return ""
+	}
+	list := strings.Join(missed[:min(len(missed), 3)], i18n.T(l, "assistant-reports.not_met_sep"))
+	if len(missed) > 3 {
+		list += i18n.T(l, "assistant-reports.not_met_more", i18n.Args{"n": len(missed) - 3})
+	}
+	return i18n.T(l, "assistant-reports.not_met", i18n.Args{"list": list})
 }
