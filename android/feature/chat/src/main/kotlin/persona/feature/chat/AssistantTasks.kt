@@ -662,10 +662,11 @@ private fun InterruptedReceipt(item: FeedItem, host: AssistantTaskHost, todos: L
     val todo = todos.firstOrNull { it.id == item.ref }
     val title = receiptTitle(item, todo) ?: stringResource(R.string.chat_tasks_default_title)
     val state = todo?.let { host.tasks.stateOf(it, host.sessions) }
-    // A turn with no output the hub still has pending (#10187), its Agent's row not at hand (only the offline stand-in):
-    // the receipt's own resolution stands, not "resumed".
+    // A turn with no output the hub still has pending (#10187): the hub's resolution says when it went on (it is sent
+    // again then), so its own sentence stands, not "resumed", unless the task is seen working or done here. The rows of
+    // the task's other Agents (or an offline stand-in for a missing one) say nothing of it.
     val pendingSilent = todo != null && item.field("resolution") == "pending" && item.field("cause") in silentCauses &&
-        host.tasks.agentsOf(todo, host.sessions).all { it.agentState == AgentState.Offline }
+        state != TaskState.Working && state != TaskState.Done
     if (todo != null && state != TaskState.Interrupted && !pendingSilent) {
         Row(Modifier.clip(PersonaTheme.shapes.controlShape).clickable { openTask(host, todo) }.padding(vertical = Tokens.Space.xs),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Tokens.Space.xs)) {

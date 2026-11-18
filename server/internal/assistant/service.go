@@ -109,6 +109,9 @@ type Service struct {
 	// taskRetry is how long a task waits before its one retry after a dropped link (0: taskStartRetryDelay; tests
 	// shorten it).
 	taskRetry time.Duration
+	// continuePolled, when set (tests), is told each time a sent "Continue"'s guard begins its next read of the agent
+	// (n from 1), after it handled the read before: a test waits on the guard with it (continueTask).
+	continuePolled func(n int)
 	// leaderResume bounds each attempt to put a supervision message into a closed task leader agent, and is the first
 	// wait of the retries after one failed (0: leaderResumeWait; tests shorten it, task_leader.go leaderResumeTime).
 	leaderResume time.Duration

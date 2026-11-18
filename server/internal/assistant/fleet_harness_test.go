@@ -38,8 +38,6 @@ type fleetDevs struct {
 	confirmed   map[string]bool
 	// watched: the sessions an app has open (Watched), by machine and session.
 	watched map[[2]string]bool
-	// looks counts the single-session reads (Session), by machine and session: a test waits on a poll with it.
-	looks map[[2]string]int
 }
 
 type fleetNode struct {
@@ -200,22 +198,11 @@ func keptWhere(list []proto.Session, keep func(*proto.Session) bool) []proto.Ses
 	return out
 }
 
-// sessionLooks is how many times session on machine id was read on its own (Session).
-func (d *fleetDevs) sessionLooks(id, session string) int {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.looks[[2]string{id, session}]
-}
-
 // Session finds one session in place, as devices.Session does: copying the whole list here would make a benchmark of a
 // lookup measure this fake instead.
 func (d *fleetDevs) Session(id, session string) (proto.Session, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.looks == nil {
-		d.looks = map[[2]string]int{}
-	}
-	d.looks[[2]string{id, session}]++
 	if n := d.machines[id]; n != nil {
 		for i := range n.sessions {
 			if n.sessions[i].SessionID == session {

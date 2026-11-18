@@ -258,14 +258,31 @@ func TestSilentTaskTurnIsNotShownAsDone(t *testing.T) {
 			}
 
 			// "Continue" goes once: a second tap while the agent has not taken it up sends nothing more, though the node's
-			// row has no turn error of its own for the hub's verdict: not right away, nor after the guard read the row.
+			// row has no turn error of its own for the hub's verdict. Not right away; nor once the guard read the row, read
+			// it with no answer (the claim stays), or read its time corrected back from a later one Continue was picked at.
+			var polls atomic.Int32
+			s.continuePolled = func(n int) { polls.Store(int32(n)) }
+			nextPoll := func(what string) {
+				t.Helper()
+				after := polls.Load()
+				waitFor(t, what, func() bool { return polls.Load() >= after+2 }) // the read after one fully handled
+			}
+			moved := done
+			moved.UpdatedAt = done.UpdatedAt.Add(time.Second) // the same turn, its time read a moment late
+			ft.d.setSessions("box", []proto.Session{moved})
+			if listed(t, s, "box", "s1").TurnError == "" {
+				t.Fatal("the verdict does not show a moment later")
+			}
 			for range 2 {
 				if _, err := s.continueTask(ctx, todo); err != nil {
 					t.Fatal(err)
 				}
 			}
-			looks := ft.d.sessionLooks("box", "s1")
-			waitFor(t, "the guard to read the row twice", func() bool { return ft.d.sessionLooks("box", "s1") >= looks+2 })
+			ft.d.setSessions("box", []proto.Session{done}) // its time corrected: the verdict still shows
+			nextPoll("the guard to read the corrected row")
+			ft.d.setSessions("box", nil) // the node's row gone for a read: no answer
+			nextPoll("the guard to read with no answer")
+			ft.d.setSessions("box", []proto.Session{done})
 			if _, err := s.continueTask(ctx, todo); err != nil {
 				t.Fatal(err)
 			}
@@ -279,6 +296,9 @@ func TestSilentTaskTurnIsNotShownAsDone(t *testing.T) {
 			ft.f.mu.Unlock()
 			if n := continues; n != 1 {
 				t.Fatalf("%d sends of Continue, want 1", n)
+			}
+			if n := polls.Load(); n < 3 {
+				t.Fatalf("the guard stopped after %d reads", n)
 			}
 
 			// The agent works again, its row as it was (the same time, no Rev): the start ends the verdict, and the row
@@ -306,9 +326,13 @@ func TestQuietTurnKind(t *testing.T) {
 	esc := proto.Item{Kind: proto.KindNotice, Role: "system", Text: userStoppedNotice}
 	reply := proto.Item{Kind: proto.KindText, Role: "assistant", Text: "好了"}
 	a := time.Now().Add(-time.Minute) // turn A's stretch of work began
+	kindOf := func(sid string, items []proto.Item, since time.Time) string {
+		_, stopped := s.stopFor("box", sid, since)
+		return quietTurnKind(items, stopped)
+	}
 	check := func(when string, items []proto.Item, since time.Time, want string) {
 		t.Helper()
-		if got := s.quietTurnKind("box", "s1", items, since); got != want {
+		if got := kindOf("s1", items, since); got != want {
 			t.Errorf("%s: %q, want %q", when, got, want)
 		}
 	}
@@ -327,27 +351,37 @@ func TestQuietTurnKind(t *testing.T) {
 	check("Persona's Stop, with the notice", []proto.Item{prompt, esc}, a, proto.TurnErrorStopped)
 	check("Persona's Stop after a reply", []proto.Item{prompt, reply}, a, "")
 	check("a later turn B, its own stretch", []proto.Item{prompt}, time.Now(), proto.TurnErrorNoOutput)
-	if s.quietTurnKind("box", "s2", []proto.Item{prompt}, a) != proto.TurnErrorNoOutput {
+	if kindOf("s2", []proto.Item{prompt}, a) != proto.TurnErrorNoOutput {
 		t.Error("a Stop of another agent counted")
 	}
-	spent, _ := s.stopEnded("box", "s1")
+	spent, _ := s.stopFor("box", "s1", a)
 	s.forgetStop("box", "s1", spent)
 	check("its turn end taken up", []proto.Item{prompt}, a, proto.TurnErrorNoOutput)
 
-	// A look that took up the end of a turn a Stop interrupted spends that Stop alone: a newer Stop, sent since for
-	// the next turn (its end not heard yet), stays.
+	// A look at the end of a turn spends only the Stop it found for that turn, read once: a newer Stop sent after
+	// that read (for the next turn, its end not heard yet) is neither found nor spent by it.
 	s.noteStopped("box", "s1", a)
 	s.stopTurnEnded("box", "s1", time.Now())
-	older, ended := s.stopEnded("box", "s1")
-	if !ended {
+	older, ok := s.stopFor("box", "s1", a) // the older look's read
+	if !ok {
 		t.Fatal("the Stop's turn end was not noted")
 	}
 	time.Sleep(time.Millisecond)
 	b := time.Now()
-	newer := s.noteStopped("box", "s1", b)
+	newer := s.noteStopped("box", "s1", b) // registered after that read
+	if at, ok := s.stopFor("box", "s1", a); ok {
+		t.Fatalf("the older look would find the newer Stop: %v", at)
+	}
+	if at, ok := s.stopFor("box", "s1", b); ok {
+		t.Fatalf("a Stop whose end is still to come was found: %v", at)
+	}
 	s.forgetStop("box", "s1", older)
-	if at, _ := s.stopEnded("box", "s1"); !at.Equal(newer) {
-		t.Fatalf("an older look erased the newer Stop: %v", at)
+	q := &s.tasks.quiet
+	q.mu.Lock()
+	kept := q.stops[SessionRef{MachineID: "box", SessionID: "s1"}]
+	q.mu.Unlock()
+	if !kept.at.Equal(newer) {
+		t.Fatalf("an older look erased the newer Stop: %+v", kept)
 	}
 	s.stopTurnEnded("box", "s1", time.Now())
 	check("the newer Stop's turn", []proto.Item{prompt}, b, proto.TurnErrorStopped)
@@ -368,7 +402,6 @@ func TestQuietTurnKind(t *testing.T) {
 
 	// The window is the turn end's, not the look's: an end heard long after the Stop is not its; one heard in time
 	// still is, however late it is looked at.
-	q := &s.tasks.quiet
 	put := func(at, ended time.Time) {
 		q.mu.Lock()
 		q.stops[SessionRef{MachineID: "box", SessionID: "s1"}] = stopMark{at: at, stretch: a, ended: ended}
@@ -531,13 +564,26 @@ func TestQuietMarkHolds(t *testing.T) {
 			t.Errorf("%s: %v", c.name, got)
 		}
 	}
+	// The guard goes by the verdict's own row, whatever row Continue picked it at: picked a moment late (t+1s, the
+	// verdict still showing), a poll that reads the time corrected back to t keeps the claim, as the verdict still
+	// shows then too; only a row the verdict no longer holds for lets it go.
+	s, _ := newQuietService(t)
 	for _, kind := range []string{proto.TurnErrorNoOutput, proto.TurnErrorStopped} {
-		cut := proto.Session{UpdatedAt: at, TurnError: "x", TurnErrorKind: kind}
-		for _, d := range []time.Duration{0, time.Second, quietSlack + time.Second, -time.Second} {
-			row := proto.Session{UpdatedAt: at.Add(d)}
-			if continueTakenUp(row, cut) == rowOf(cut).holds(row) {
-				t.Errorf("%s, %v later: the guard and the verdict disagree", kind, d)
+		verdict := proto.Session{MachineID: "box", SessionID: "s1", UpdatedAt: at}
+		s.markQuietTurn(verdict, kind)
+		cut := proto.Session{MachineID: "box", SessionID: "s1", UpdatedAt: at.Add(time.Second), TurnError: "x", TurnErrorKind: kind}
+		row := s.cutRow(cut)
+		if !row.seen.Equal(at) {
+			t.Fatalf("%s: Continue goes by %v, not the verdict's row", kind, row.seen)
+		}
+		for _, d := range []time.Duration{0, time.Second, quietSlack, quietSlack + time.Second, -time.Second} {
+			poll := proto.Session{UpdatedAt: at.Add(d)}
+			if continueTakenUp(poll, cut, row) == row.holds(poll) {
+				t.Errorf("%s, a poll %v from the verdict: the guard and the verdict disagree", kind, d)
 			}
+		}
+		if continueTakenUp(proto.Session{UpdatedAt: at}, cut, row) {
+			t.Errorf("%s: a corrected time let the claim go while the verdict shows", kind)
 		}
 	}
 	withRev := rowAt{rev: 5, seen: at}
@@ -732,7 +778,7 @@ func TestQuietTurnsExpire(t *testing.T) {
 		t.Fatalf("an expired verdict was looked up: %+v", got)
 	}
 	stop("old", time.Now().Add(-stopKeep-time.Minute))
-	if _, ok := s.stopEnded("mac", "old"); ok {
+	if _, ok := s.stopFor("mac", "old", time.Now().Add(-stopKeep-time.Minute)); ok {
 		t.Fatal("an expired Stop was looked up")
 	}
 	if m, st := sizes(); m != 0 || st != 0 {

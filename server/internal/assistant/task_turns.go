@@ -339,7 +339,10 @@ func (s *Service) saveTurnsLocked(ctx context.Context) {
 // one to take off): the ledger holds one turn for each open task that had one, no more. A closed task that is opened
 // again starts from what ends after that (recoverTurn), and a turn's receipt keeps its one id in the feed.
 func (s *Service) pruneTurns(ctx context.Context) {
-	s.pruneQuiet(time.Now(), "", nil) // the verdicts and Stops kept past their time (silent_turns.go)
+	// The verdicts and Stops kept past their time (silent_turns.go); the apps are told the rows that lose one.
+	for m := range s.pruneQuiet(time.Now(), "", nil) {
+		go s.publishSessions(m)
+	}
 	b := &s.tasks.turns
 	b.mu.Lock()
 	if !s.turnsLocked(ctx) || len(b.doc.Turns) == 0 {

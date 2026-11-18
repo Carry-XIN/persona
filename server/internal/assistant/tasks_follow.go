@@ -315,14 +315,11 @@ type receiptReview struct {
 // interruptedSummary is an interrupted task's receipt: the error itself is no conclusion (#1516).
 const interruptedSummary = assistantwire.InterruptedSummary
 
-// quietTurnKind is what agent sid on machine's turn, read as items, in the task's stretch of work since since, is when
-// it had no output at all: proto.TurnErrorStopped when Persona's Stop interrupted that turn (stopReporting,
-// stoppedByPersona), proto.TurnErrorNoOutput when nothing did
-// (silentTurn). "" for a turn with output, one the user stopped themselves (Esc: theirs to go on with), or one that
-// could not be read.
-func (s *Service) quietTurnKind(machine, sid string, items []proto.Item, since time.Time) string {
+// quietTurnKind is what a turn, read as items, is when it had no output at all: proto.TurnErrorStopped when Persona's
+// Stop interrupted it (stopped: stopFor found that Stop), proto.TurnErrorNoOutput when nothing did (silentTurn). "" for
+// a turn with output, one the user stopped themselves (Esc: theirs to go on with), or one that could not be read.
+func quietTurnKind(items []proto.Item, stopped bool) string {
 	none, userStopped := turnWithoutOutput(items)
-	_, stopped := s.stoppedByPersona(machine, sid, since)
 	switch {
 	case !none:
 		return ""
@@ -469,7 +466,8 @@ func (s *Service) settleTurn(ctx context.Context, machine, sid, unheard string) 
 		if _, closed := turnEndOf(items); !closed {
 			return settleLater // it went on since the sweep read it
 		}
-		if cut.SessionID == "" && taskTurnAwaitingAnswer(items) && s.quietTurnKind(last.MachineID, last.SessionID, items, s.taskStretch(t)) == "" {
+		_, stopped := s.stopFor(last.MachineID, last.SessionID, s.taskStretch(t))
+		if cut.SessionID == "" && taskTurnAwaitingAnswer(items) && quietTurnKind(items, stopped) == "" {
 			return settleHeld // stopped between its tools and its answer: held as below, with no start taken for it
 		}
 		if !heard {
@@ -516,10 +514,11 @@ func (s *Service) settleTurn(ctx context.Context, machine, sid, unheard string) 
 	}
 	end, named := turnEndOf(items)
 	quiet := "" // the turn had no output: proto.TurnErrorNoOutput, or proto.TurnErrorStopped (silent_turns.go)
-	// The Stop whose turn end this is, if one was sent: spent with this end's receipt, never a newer one (forgetStop).
-	stop, _ := s.stopEnded(last.MachineID, last.SessionID)
+	// The Stop that interrupted this turn, if one did: read once, it classifies the turn and is the one its receipt
+	// spends, never a newer one (stopFor, forgetStop).
+	stop, stopped := s.stopFor(last.MachineID, last.SessionID, since)
 	if read {
-		quiet = s.quietTurnKind(last.MachineID, last.SessionID, items, since)
+		quiet = quietTurnKind(items, stopped)
 	}
 	if cut.SessionID != "" {
 		s.forgetStop(last.MachineID, last.SessionID, stop)

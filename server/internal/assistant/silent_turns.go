@@ -206,37 +206,33 @@ func (s *Service) stopTurnEnded(machine, sid string, now time.Time) {
 	}
 }
 
-// stoppedByPersona: Persona's Stop interrupted agent sid on machine in the task's stretch of work that began at
-// stretch, and the hub heard that turn end after the Stop, within stopCounts of it. A turn end heard before the Stop
-// was sent (the turn ended by itself), a later stretch's (another turn), and a turn end taken up since (forgetStop)
-// are not the Stop's. attempt is that Stop's, for forgetStop.
-func (s *Service) stoppedByPersona(machine, sid string, stretch time.Time) (attempt time.Time, ok bool) {
-	at, ended := s.stopEnded(machine, sid)
-	q := &s.tasks.quiet
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	m := q.stops[SessionRef{MachineID: machine, SessionID: sid}]
-	return at, ended && m.stretch.Equal(stretch) && m.ended.Sub(m.at) <= stopCounts
-}
-
-// stopEnded is the Stop of agent sid on machine whose turn end the hub heard (ok), by its attempt: the one a look at
-// that end takes up and spends (forgetStop). A Stop whose turn end is still to come is not it. One kept past
-// stopKeep is let go here.
-func (s *Service) stopEnded(machine, sid string) (attempt time.Time, ok bool) {
+// stopFor is the Stop that interrupted agent sid on machine's turn in the task's stretch of work that began at
+// stretch, by its attempt (ok): one Stop, read under one lock, sent in that stretch, whose turn end the hub heard after
+// it was sent, within stopCounts of it. A Stop whose end is still to come (a newer one, for a turn going on), one of
+// another stretch, one whose turn ended before it was sent, and one taken up since (forgetStop) are none. That same
+// attempt classifies the turn (quietTurnKind) and is the one its receipt spends (forgetStop). One kept past stopKeep
+// is let go here.
+func (s *Service) stopFor(machine, sid string, stretch time.Time) (attempt time.Time, ok bool) {
 	q := &s.tasks.quiet
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	ref := SessionRef{MachineID: machine, SessionID: sid}
 	m, found := q.stops[ref]
-	if found && time.Since(m.at) > stopKeep {
+	if !found {
+		return time.Time{}, false
+	}
+	if time.Since(m.at) > stopKeep {
 		delete(q.stops, ref)
 		return time.Time{}, false
 	}
-	return m.at, found && !m.ended.IsZero()
+	if m.ended.IsZero() || !m.stretch.Equal(stretch) || m.ended.Sub(m.at) > stopCounts {
+		return time.Time{}, false
+	}
+	return m.at, true
 }
 
-// forgetStop: a turn end of agent sid on machine was taken up (a receipt): the Stop attempt it was the end of
-// (stopEnded; zero: none) is spent on that turn. A newer Stop, sent since, stays for the turn it interrupts.
+// forgetStop: a turn end of agent sid on machine was taken up (a receipt): the Stop attempt that interrupted it
+// (stopFor; zero: none) is spent on that turn. A newer Stop, sent since, stays for the turn it interrupts.
 func (s *Service) forgetStop(machine, sid string, attempt time.Time) {
 	if !attempt.IsZero() {
 		s.forgetStopAttempt(machine, sid, attempt)
@@ -244,14 +240,19 @@ func (s *Service) forgetStop(machine, sid string, attempt time.Time) {
 }
 
 // pruneQuiet lets go of the verdicts and Stops kept past their time (the supervision sweep, pruneTurns), and with
-// gone, of those of the sessions a machine's complete list no longer has (fillStateMarks).
-func (s *Service) pruneQuiet(now time.Time, machine string, gone func(sid string) bool) {
+// gone, of those of machine's sessions its node no longer lists (pruneGoneQuiet). It says which machines lost a
+// verdict, whose lists the apps have with it.
+func (s *Service) pruneQuiet(now time.Time, machine string, gone func(sid string) bool) (changed map[string]bool) {
 	q := &s.tasks.quiet
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	for ref, m := range q.marks {
 		if now.Sub(m.at) > quietMarkKeep || gone != nil && ref.MachineID == machine && gone(ref.SessionID) {
 			delete(q.marks, ref)
+			if changed == nil {
+				changed = map[string]bool{}
+			}
+			changed[ref.MachineID] = true
 		}
 	}
 	for ref, m := range q.stops {
@@ -259,6 +260,31 @@ func (s *Service) pruneQuiet(now time.Time, machine string, gone func(sid string
 			delete(q.stops, ref)
 		}
 	}
+	return changed
+}
+
+// pruneGoneQuiet lets go of the verdicts and Stops of machine's sessions its node no longer lists (setSessions, on
+// the node's own news of its list). It asks the devices' list as it is now, not a copy read earlier: a reader's old
+// copy, from before an agent was listed, never takes a fresh verdict or Stop away.
+func (s *Service) pruneGoneQuiet(machine string) {
+	q := &s.tasks.quiet
+	q.mu.Lock()
+	has := false
+	for ref := range q.marks {
+		has = has || ref.MachineID == machine
+	}
+	for ref := range q.stops {
+		has = has || ref.MachineID == machine
+	}
+	q.mu.Unlock()
+	if !has || s.devs == nil {
+		return
+	}
+	listed := map[string]bool{}
+	if _, ok := s.devs.SessionsWhere(machine, func(c *proto.Session) bool { listed[c.SessionID] = true; return false }); !ok {
+		return // the devices do not have the machine (now): nothing to go by
+	}
+	s.pruneQuiet(time.Now(), machine, func(sid string) bool { return !listed[sid] })
 }
 
 // taskStretch is when task t's current stretch of work began, as settleTurn counts it (its since): when one of its
