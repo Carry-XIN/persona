@@ -524,6 +524,9 @@ func (r *voiceRun) failureOf(s *proto.Session) string {
 	if !turnFailed(s) {
 		return ""
 	}
+	if s.TurnErrorKind == proto.TurnErrorNoOutput {
+		return "no_output" // the hub's word: the model service answered nothing (#10187)
+	}
 	switch s.TurnErrorCode {
 	case proto.TurnErrorNotLoggedIn, proto.TurnErrorAuthFailed, proto.TurnErrorModelRoute, proto.TurnErrorRateLimited:
 		return s.TurnErrorCode

@@ -51,27 +51,39 @@ type stopMark struct {
 	at, stretch, ended time.Time
 }
 
-// quietMark: the turn of an agent that ended at its row (rev, seen, and its last words text where known) had no
-// output; kind is proto.TurnErrorNoOutput or proto.TurnErrorStopped.
-type quietMark struct {
-	kind      string
+// rowAt is which turn an agent's row was at, as far as the row tells: its Rev, its time (seen) and its last words
+// (text, where known). It is the one identity the verdict (quietMark.holds) and "Continue"'s guard (continueTakenUp)
+// both go by: a row the verdict still holds for is one Continue has not been taken up at, and the other way round.
+type rowAt struct {
 	rev       int64
 	seen      time.Time
 	text      string
 	textKnown bool // the ledger keeps no words: a verdict it restored has none to go by
-	at        time.Time
 }
 
-// holds: c is still the row the verdict was made at: nothing written to its transcript since. Its Rev says so where
-// both have one; else its time, no earlier and at most quietSlack later, with the same last words.
-func (m quietMark) holds(c proto.Session) bool {
-	if m.rev != 0 && c.Rev != 0 {
-		return c.Rev == m.rev
+// rowOf is the turn row c is at.
+func rowOf(c proto.Session) rowAt {
+	return rowAt{rev: c.Rev, seen: c.UpdatedAt, text: c.LastText, textKnown: true}
+}
+
+// holds: c is still at row r: nothing written to its transcript since. Its Rev says so where both have one; else its
+// time, no earlier and at most quietSlack later, with the same last words.
+func (r rowAt) holds(c proto.Session) bool {
+	if r.rev != 0 && c.Rev != 0 {
+		return c.Rev == r.rev
 	}
-	if c.UpdatedAt.Before(m.seen) || c.UpdatedAt.After(m.seen.Add(quietSlack)) {
+	if c.UpdatedAt.Before(r.seen) || c.UpdatedAt.After(r.seen.Add(quietSlack)) {
 		return false
 	}
-	return !m.textKnown || c.LastText == m.text
+	return !r.textKnown || c.LastText == r.text
+}
+
+// quietMark: the turn of an agent that ended at its row had no output; kind is proto.TurnErrorNoOutput or
+// proto.TurnErrorStopped; at: when the verdict was made.
+type quietMark struct {
+	rowAt
+	kind string
+	at   time.Time
 }
 
 // quietTurnText is the turn error a row with verdict kind shows, in l.
@@ -84,8 +96,8 @@ func quietTurnText(l i18n.Lang, kind string) string {
 
 // markQuietTurn keeps that agent c's turn, ending at this row, had no output (kind), and has the apps told the row.
 func (s *Service) markQuietTurn(c proto.Session, kind string) {
-	s.putQuietMarks(map[SessionRef]quietMark{{MachineID: c.MachineID, SessionID: c.SessionID}: {kind: kind, rev: c.Rev,
-		seen: c.UpdatedAt, text: c.LastText, textKnown: true, at: time.Now()}})
+	s.putQuietMarks(map[SessionRef]quietMark{{MachineID: c.MachineID, SessionID: c.SessionID}: {rowAt: rowOf(c), kind: kind,
+		at: time.Now()}})
 	s.publishSessions(c.MachineID)
 }
 
@@ -116,7 +128,12 @@ func (s *Service) quietMarks(machine string) map[string]quietMark {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	var out map[string]quietMark
+	now := time.Now()
 	for ref, m := range q.marks {
+		if now.Sub(m.at) > quietMarkKeep {
+			delete(q.marks, ref) // kept past its time (pruneQuiet does the rest)
+			continue
+		}
 		if ref.MachineID == machine {
 			if out == nil {
 				out = map[string]quietMark{}
@@ -192,21 +209,56 @@ func (s *Service) stopTurnEnded(machine, sid string, now time.Time) {
 // stoppedByPersona: Persona's Stop interrupted agent sid on machine in the task's stretch of work that began at
 // stretch, and the hub heard that turn end after the Stop, within stopCounts of it. A turn end heard before the Stop
 // was sent (the turn ended by itself), a later stretch's (another turn), and a turn end taken up since (forgetStop)
-// are not the Stop's.
-func (s *Service) stoppedByPersona(machine, sid string, stretch time.Time) bool {
+// are not the Stop's. attempt is that Stop's, for forgetStop.
+func (s *Service) stoppedByPersona(machine, sid string, stretch time.Time) (attempt time.Time, ok bool) {
+	at, ended := s.stopEnded(machine, sid)
 	q := &s.tasks.quiet
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	m, ok := q.stops[SessionRef{MachineID: machine, SessionID: sid}]
-	return ok && m.stretch.Equal(stretch) && !m.ended.IsZero() && m.ended.Sub(m.at) <= stopCounts
+	m := q.stops[SessionRef{MachineID: machine, SessionID: sid}]
+	return at, ended && m.stretch.Equal(stretch) && m.ended.Sub(m.at) <= stopCounts
 }
 
-// forgetStop: a turn end of agent sid on machine was taken up (a receipt): the Stop before it is spent on that turn.
-func (s *Service) forgetStop(machine, sid string) {
+// stopEnded is the Stop of agent sid on machine whose turn end the hub heard (ok), by its attempt: the one a look at
+// that end takes up and spends (forgetStop). A Stop whose turn end is still to come is not it. One kept past
+// stopKeep is let go here.
+func (s *Service) stopEnded(machine, sid string) (attempt time.Time, ok bool) {
 	q := &s.tasks.quiet
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	delete(q.stops, SessionRef{MachineID: machine, SessionID: sid})
+	ref := SessionRef{MachineID: machine, SessionID: sid}
+	m, found := q.stops[ref]
+	if found && time.Since(m.at) > stopKeep {
+		delete(q.stops, ref)
+		return time.Time{}, false
+	}
+	return m.at, found && !m.ended.IsZero()
+}
+
+// forgetStop: a turn end of agent sid on machine was taken up (a receipt): the Stop attempt it was the end of
+// (stopEnded; zero: none) is spent on that turn. A newer Stop, sent since, stays for the turn it interrupts.
+func (s *Service) forgetStop(machine, sid string, attempt time.Time) {
+	if !attempt.IsZero() {
+		s.forgetStopAttempt(machine, sid, attempt)
+	}
+}
+
+// pruneQuiet lets go of the verdicts and Stops kept past their time (the supervision sweep, pruneTurns), and with
+// gone, of those of the sessions a machine's complete list no longer has (fillStateMarks).
+func (s *Service) pruneQuiet(now time.Time, machine string, gone func(sid string) bool) {
+	q := &s.tasks.quiet
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for ref, m := range q.marks {
+		if now.Sub(m.at) > quietMarkKeep || gone != nil && ref.MachineID == machine && gone(ref.SessionID) {
+			delete(q.marks, ref)
+		}
+	}
+	for ref, m := range q.stops {
+		if now.Sub(m.at) > stopKeep || gone != nil && ref.MachineID == machine && gone(ref.SessionID) {
+			delete(q.stops, ref)
+		}
+	}
 }
 
 // taskStretch is when task t's current stretch of work began, as settleTurn counts it (its since): when one of its
@@ -229,7 +281,11 @@ func (s *Service) restoreQuietTurns(turns map[string]taskTurn) {
 		if e.Silent == "" || e.State != turnInterrupted {
 			continue
 		}
-		marks[SessionRef{MachineID: e.Machine, SessionID: e.Session}] = quietMark{kind: e.Silent, rev: e.Rev, seen: e.Seen, at: e.At}
+		if time.Since(e.At) > quietMarkKeep {
+			continue // kept past its time: not put back
+		}
+		marks[SessionRef{MachineID: e.Machine, SessionID: e.Session}] = quietMark{rowAt: rowAt{rev: e.Rev, seen: e.Seen},
+			kind: e.Silent, at: e.At}
 		machines[e.Machine] = true
 	}
 	if len(marks) == 0 {

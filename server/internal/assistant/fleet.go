@@ -435,6 +435,7 @@ func (s *Service) fillStateMarks(machine string, list []proto.Session, now time.
 			delete(s.fleet.hooked, k)
 		}
 	}
+	s.pruneQuiet(now, machine, func(sid string) bool { return !listed[sid] }) // and its verdict and Stop (silent_turns.go)
 }
 
 // backgroundWaiting (Session.BackgroundWaiting, #6045): working only because of background work, and that work only

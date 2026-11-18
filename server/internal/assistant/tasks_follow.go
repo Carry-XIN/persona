@@ -322,10 +322,11 @@ const interruptedSummary = assistantwire.InterruptedSummary
 // could not be read.
 func (s *Service) quietTurnKind(machine, sid string, items []proto.Item, since time.Time) string {
 	none, userStopped := turnWithoutOutput(items)
+	_, stopped := s.stoppedByPersona(machine, sid, since)
 	switch {
 	case !none:
 		return ""
-	case s.stoppedByPersona(machine, sid, since):
+	case stopped:
 		return proto.TurnErrorStopped // Claude Code may write the interrupted notice for Persona's Esc, or nothing
 	case userStopped:
 		return ""
@@ -515,11 +516,13 @@ func (s *Service) settleTurn(ctx context.Context, machine, sid, unheard string) 
 	}
 	end, named := turnEndOf(items)
 	quiet := "" // the turn had no output: proto.TurnErrorNoOutput, or proto.TurnErrorStopped (silent_turns.go)
+	// The Stop whose turn end this is, if one was sent: spent with this end's receipt, never a newer one (forgetStop).
+	stop, _ := s.stopEnded(last.MachineID, last.SessionID)
 	if read {
 		quiet = s.quietTurnKind(last.MachineID, last.SessionID, items, since)
 	}
 	if cut.SessionID != "" {
-		s.forgetStop(last.MachineID, last.SessionID)
+		s.forgetStop(last.MachineID, last.SessionID, stop)
 		if _, again := s.takeTurn(cctx, t, last, items, end, named, since, turnInterrupted); again {
 			return settleTaken // this very turn was taken up before: no second receipt
 		}
@@ -564,7 +567,7 @@ func (s *Service) settleTurn(ctx context.Context, machine, sid, unheard string) 
 			s.releaseReceipt(ctx, t.ID, machine, sid, reserved)
 			return settleLater
 		}
-		s.forgetStop(last.MachineID, last.SessionID)
+		s.forgetStop(last.MachineID, last.SessionID, stop)
 		// The ledger keeps the verdict with the turn, for a manager started again (silent_turns.go).
 		if _, again := s.takeTurnAs(cctx, t, last, items, end, named, since, turnInterrupted, quiet); again {
 			return settleTaken // this very turn was taken up before: no second receipt
@@ -605,7 +608,7 @@ func (s *Service) settleTurn(ctx context.Context, machine, sid, unheard string) 
 		s.logf("task %s: cancelled or agent %s/%s aborted: not issuing done receipt", t.ID, machine, sid)
 		return settleRefused
 	}
-	s.forgetStop(last.MachineID, last.SessionID) // a Stop that came after its output: this turn's
+	s.forgetStop(last.MachineID, last.SessionID, stop) // a Stop that came after its output: this turn's
 	body := receiptBody{Title: t.Title, State: "done", Summary: clipMarkdown(text, 600), Machine: name,
 		Reroute: s.rerouteOfTask(cctx, t.ID, t.PlanID)}
 	// Persona follows up on a supervised stop through sigReview or sigIdle after judgment; the receipt need not wait.

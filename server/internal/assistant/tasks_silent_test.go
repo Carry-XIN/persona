@@ -4,8 +4,11 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"github.com/nwverse/persona/server/internal/db"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -255,13 +258,14 @@ func TestSilentTaskTurnIsNotShownAsDone(t *testing.T) {
 			}
 
 			// "Continue" goes once: a second tap while the agent has not taken it up sends nothing more, though the node's
-			// row has no turn error of its own for the hub's verdict.
+			// row has no turn error of its own for the hub's verdict: not right away, nor after the guard read the row.
 			for range 2 {
 				if _, err := s.continueTask(ctx, todo); err != nil {
 					t.Fatal(err)
 				}
 			}
-			time.Sleep(300 * time.Millisecond) // a poll of the guard
+			looks := ft.d.sessionLooks("box", "s1")
+			waitFor(t, "the guard to read the row twice", func() bool { return ft.d.sessionLooks("box", "s1") >= looks+2 })
 			if _, err := s.continueTask(ctx, todo); err != nil {
 				t.Fatal(err)
 			}
@@ -326,8 +330,29 @@ func TestQuietTurnKind(t *testing.T) {
 	if s.quietTurnKind("box", "s2", []proto.Item{prompt}, a) != proto.TurnErrorNoOutput {
 		t.Error("a Stop of another agent counted")
 	}
-	s.forgetStop("box", "s1")
+	spent, _ := s.stopEnded("box", "s1")
+	s.forgetStop("box", "s1", spent)
 	check("its turn end taken up", []proto.Item{prompt}, a, proto.TurnErrorNoOutput)
+
+	// A look that took up the end of a turn a Stop interrupted spends that Stop alone: a newer Stop, sent since for
+	// the next turn (its end not heard yet), stays.
+	s.noteStopped("box", "s1", a)
+	s.stopTurnEnded("box", "s1", time.Now())
+	older, ended := s.stopEnded("box", "s1")
+	if !ended {
+		t.Fatal("the Stop's turn end was not noted")
+	}
+	time.Sleep(time.Millisecond)
+	b := time.Now()
+	newer := s.noteStopped("box", "s1", b)
+	s.forgetStop("box", "s1", older)
+	if at, _ := s.stopEnded("box", "s1"); !at.Equal(newer) {
+		t.Fatalf("an older look erased the newer Stop: %v", at)
+	}
+	s.stopTurnEnded("box", "s1", time.Now())
+	check("the newer Stop's turn", []proto.Item{prompt}, b, proto.TurnErrorStopped)
+	s.forgetStop("box", "s1", time.Time{}) // a look with no Stop of its own spends none
+	check("the newer Stop's turn, still", []proto.Item{prompt}, b, proto.TurnErrorStopped)
 
 	// An interrupt that did not go out is taken back, a later one's attempt is not.
 	first := s.noteStopped("box", "s1", a)
@@ -486,10 +511,11 @@ func TestQuietTurnTranscriptMovesDuringTheRead(t *testing.T) {
 }
 
 // Without a Rev, a row is the verdict's only at its time (or a moment later) with the same last words: an older row,
-// or a next turn that came and went between two lists, is not.
+// or a next turn that came and went between two lists, is not. "Continue"'s guard goes by the same identity: it lets
+// go exactly when the verdict no longer holds, so a time read a moment late keeps both.
 func TestQuietMarkHolds(t *testing.T) {
 	at := time.Now()
-	m := quietMark{kind: proto.TurnErrorNoOutput, seen: at, textKnown: true}
+	m := rowAt{seen: at, textKnown: true}
 	for _, c := range []struct {
 		name string
 		row  proto.Session
@@ -505,7 +531,16 @@ func TestQuietMarkHolds(t *testing.T) {
 			t.Errorf("%s: %v", c.name, got)
 		}
 	}
-	withRev := quietMark{rev: 5, seen: at}
+	for _, kind := range []string{proto.TurnErrorNoOutput, proto.TurnErrorStopped} {
+		cut := proto.Session{UpdatedAt: at, TurnError: "x", TurnErrorKind: kind}
+		for _, d := range []time.Duration{0, time.Second, quietSlack + time.Second, -time.Second} {
+			row := proto.Session{UpdatedAt: at.Add(d)}
+			if continueTakenUp(row, cut) == rowOf(cut).holds(row) {
+				t.Errorf("%s, %v later: the guard and the verdict disagree", kind, d)
+			}
+		}
+	}
+	withRev := rowAt{rev: 5, seen: at}
 	if !withRev.holds(proto.Session{Rev: 5, UpdatedAt: at.Add(time.Hour)}) || withRev.holds(proto.Session{Rev: 6, UpdatedAt: at}) {
 		t.Error("a row with a Rev is the verdict's by its Rev alone")
 	}
@@ -555,11 +590,35 @@ func TestQuietTurnStopIsTheInterruptedTurns(t *testing.T) {
 	}
 }
 
-// A verdict written by a real turn end outlives the manager: the ledger the turn end wrote (the same write that took
-// the turn up) has it, and a manager started again on it puts it back on the row once it reads the ledger. The first
-// manager runs without a database (memStore keeps no plans): what it wrote is handed to the second as stored.
+// ledgerWrites is a store with the task plans and the feed in memory that keeps every write of the turns ledger, as
+// it was written.
+type ledgerWrites struct {
+	planUpdateStore
+	wmu    sync.Mutex
+	writes []taskTurnsDoc
+}
+
+func (r *ledgerWrites) PutSetting(ctx context.Context, key string, v any) error {
+	if key == taskTurnsKey {
+		b, _ := json.Marshal(v)
+		var doc taskTurnsDoc
+		_ = json.Unmarshal(b, &doc)
+		r.wmu.Lock()
+		r.writes = append(r.writes, doc)
+		r.wmu.Unlock()
+	}
+	return r.planUpdateStore.PutSetting(ctx, key, v)
+}
+
+// A verdict written by a real turn end outlives the manager: the very write of the ledger that takes the turn up has
+// it (a manager that stopped right after that write would have both or neither), and a manager started again on that
+// write puts it back on the row once it reads the ledger.
 func TestQuietTurnVerdictWrittenSurvivesARestart(t *testing.T) {
-	ft := newFleetTaskTest(t)
+	st := &ledgerWrites{planUpdateStore: planUpdateStore{&planMemStore{memStore: &memStore{}, plans: map[string]db.TaskPlanRow{}}}}
+	f, d := newFakeHub(), newFleetDevs()
+	d.add("mac", "Mac")
+	ft := fleetTaskTest(t, &fleetTest{t: t, s: New(Options{Hub: f, Store: func() Store { return st }, Logf: testLogf(t), Devices: d}),
+		d: d, f: f})
 	work := fleetTaskStarted(t, ft, 1)
 	ft.f.setItems(proto.Item{Kind: proto.KindText, Role: "user", Text: "做吧"})
 	done := work
@@ -569,19 +628,27 @@ func TestQuietTurnVerdictWrittenSurvivesARestart(t *testing.T) {
 	if rb := receiptOf(t, ft.s, "conv1", id, 1); rb.Cause != causeNoOutput {
 		t.Fatalf("receipt %+v", rb)
 	}
-	b := &ft.s.tasks.turns
-	b.mu.Lock()
-	doc := b.doc
-	b.mu.Unlock()
-	if e := doc.Turns[id]; e.State != turnInterrupted || e.Silent != proto.TurnErrorNoOutput || e.Rev != 2 {
-		t.Fatalf("the ledger has %+v", e)
+	var first *taskTurnsDoc // the first write that has the turn: the one that took it up
+	st.wmu.Lock()
+	for i := range st.writes {
+		if _, ok := st.writes[i].Turns[id]; ok {
+			first = &st.writes[i]
+			break
+		}
 	}
-	st := newFleetMem()
-	if err := st.PutSetting(context.Background(), taskTurnsKey, doc); err != nil {
+	st.wmu.Unlock()
+	if first == nil {
+		t.Fatal("the ledger was never written with the turn")
+	}
+	if e := first.Turns[id]; e.State != turnInterrupted || e.Silent != proto.TurnErrorNoOutput || e.Rev != 2 {
+		t.Fatalf("the write that took the turn up has %+v", e)
+	}
+	restarted := newFleetMem()
+	if err := restarted.PutSetting(context.Background(), taskTurnsKey, *first); err != nil {
 		t.Fatal(err)
 	}
 
-	again := New(Options{Hub: ft.f, Store: func() Store { return st }, Logf: testLogf(t), Devices: ft.d})
+	again := New(Options{Hub: ft.f, Store: func() Store { return restarted }, Logf: testLogf(t), Devices: ft.d})
 	withSettings(t, ft.f, again)
 	raw, _ := json.Marshal(map[string]any{"sessions": []proto.Session{done}})
 	again.NodeEvent("box", "sessions.changed", raw)
@@ -593,6 +660,108 @@ func TestQuietTurnVerdictWrittenSurvivesARestart(t *testing.T) {
 	}
 	if row := listed(t, again, "box", "s1"); row.TurnErrorKind != proto.TurnErrorNoOutput || row.TurnError != silentTurnErrorIn(i18n.Default) {
 		t.Fatalf("after the restart: %q %q", row.TurnError, row.TurnErrorKind)
+	}
+}
+
+// "Continue" checks, once it holds the claim, that the turn it picked is still the one cut off: a row that moved
+// between the pick and the claim (an earlier Continue taken up, the owner at the computer) gets no second "继续".
+func TestContinueRevalidatesItsTurn(t *testing.T) {
+	ft := newFleetTaskTest(t)
+	s, ctx := ft.s, context.Background()
+	work := fleetTaskStarted(t, ft, 0)
+	ft.f.setItems(proto.Item{Kind: proto.KindText, Role: "user", Text: "做吧"})
+	done := work
+	done.Status, done.UpdatedAt = proto.StatusDone, time.Now()
+	ft.sessions("box", done)
+	receiptOf(t, s, "conv1", onlyTodo(s).ID, 1)
+	waitFor(t, "the verdict on the row", func() bool { return listed(t, s, "box", "s1").TurnError != "" })
+	moved := done
+	moved.UpdatedAt, moved.LastText = done.UpdatedAt.Add(time.Minute), "接着做完了"
+	// Its machine is looked up between the pick and the claim (continueTask's s.device): the row moves then.
+	var fired atomic.Bool
+	ft.f.mu.Lock()
+	ft.f.onDevicesList = func() { fired.Store(true); ft.d.setSessions("box", []proto.Session{moved}) }
+	ft.f.mu.Unlock()
+	if _, err := s.continueTask(ctx, onlyTodo(s)); err != nil {
+		t.Fatal(err)
+	}
+	if !fired.Load() {
+		t.Fatal("the row never moved between the pick and the claim")
+	}
+	ft.f.mu.Lock()
+	defer ft.f.mu.Unlock()
+	for _, c := range ft.f.calls {
+		if c.Method == DeviceSessionSend && strings.Contains(string(c.Params), `"session_id":"s1"`) {
+			t.Fatalf("Continue went to a turn that moved on: %s", c.Params)
+		}
+	}
+}
+
+// The verdicts and the Stops do not stay for good: one kept past its time is let go when it is looked up, by the
+// sweep and on a restart; those of a session its machine no longer lists go with it.
+func TestQuietTurnsExpire(t *testing.T) {
+	ft := newFleetTestNoStore(t)
+	s := ft.s
+	q := &s.tasks.quiet
+	old := time.Now().Add(-quietMarkKeep - time.Hour)
+	mark := func(sid string, at time.Time) {
+		q.mu.Lock()
+		if q.marks == nil {
+			q.marks = map[SessionRef]quietMark{}
+		}
+		q.marks[SessionRef{MachineID: "mac", SessionID: sid}] = quietMark{rowAt: rowAt{seen: at}, kind: proto.TurnErrorNoOutput, at: at}
+		q.mu.Unlock()
+	}
+	stop := func(sid string, at time.Time) {
+		q.mu.Lock()
+		if q.stops == nil {
+			q.stops = map[SessionRef]stopMark{}
+		}
+		q.stops[SessionRef{MachineID: "mac", SessionID: sid}] = stopMark{at: at, stretch: at, ended: at}
+		q.mu.Unlock()
+	}
+	sizes := func() (int, int) {
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		return len(q.marks), len(q.stops)
+	}
+
+	// On lookup.
+	mark("old", old)
+	if got := s.quietMarks("mac"); len(got) != 0 {
+		t.Fatalf("an expired verdict was looked up: %+v", got)
+	}
+	stop("old", time.Now().Add(-stopKeep-time.Minute))
+	if _, ok := s.stopEnded("mac", "old"); ok {
+		t.Fatal("an expired Stop was looked up")
+	}
+	if m, st := sizes(); m != 0 || st != 0 {
+		t.Fatalf("kept after the lookup: %d verdicts, %d Stops", m, st)
+	}
+
+	// By the sweep, with no other write.
+	mark("old", old)
+	stop("old", time.Now().Add(-stopKeep-time.Minute))
+	mark("fresh", time.Now())
+	stop("fresh", time.Now())
+	s.pruneTurns(context.Background())
+	if m, st := sizes(); m != 1 || st != 1 {
+		t.Fatalf("after the sweep: %d verdicts, %d Stops, want the fresh one of each", m, st)
+	}
+
+	// With the session gone from its machine's whole list.
+	ft.sessions("mac", proto.Session{SessionID: "other", Status: proto.StatusIdle})
+	if m, st := sizes(); m != 0 || st != 0 {
+		t.Fatalf("a session no longer listed keeps %d verdicts, %d Stops", m, st)
+	}
+
+	// Not put back from the ledger past its time.
+	s.restoreQuietTurns(map[string]taskTurn{
+		"todo_old": {Machine: "mac", Session: "a", State: turnInterrupted, Silent: proto.TurnErrorNoOutput, At: old},
+		"todo_new": {Machine: "mac", Session: "b", State: turnInterrupted, Silent: proto.TurnErrorNoOutput, At: time.Now()},
+	})
+	if got := s.quietMarks("mac"); len(got) != 1 || got["b"].kind == "" {
+		t.Fatalf("restored %+v, want b only", got)
 	}
 }
 
