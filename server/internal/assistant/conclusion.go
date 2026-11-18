@@ -101,12 +101,7 @@ func (s *Service) conclusionCard(ctx context.Context, t Todo, a acceptAsk) *feis
 	if r := recommendText(l, &a); r != "" {
 		c.Markdown(feishubot.EscapeMarkdown(r))
 	}
-	// What was asked, criterion by criterion (#3822): only once the work ended against its brief, never on a decision.
-	if a.Outcome != outcomeDecide {
-		if against := briefResultMarkdown(l, s.briefResultOfTodo(t)); against != "" {
-			c.Markdown(against)
-		}
-	}
+	// The criteria and how each ended stay on the task's page, not on the card (#10380): the card leads with the result.
 	if d := deadlineText(l, s.location(ctx), a.Deadline, a.Reversible, time.Now()); d != "" && decideAsk(&a) && a.AcceptedAt.IsZero() && a.AgentReply == nil {
 		c.Markdown(feishubot.EscapeMarkdown(d))
 	}
