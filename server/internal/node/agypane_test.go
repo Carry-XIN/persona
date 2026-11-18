@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/nwverse/persona/server/internal/host"
 	"github.com/nwverse/persona/server/internal/i18n"
@@ -228,7 +227,10 @@ func TestAgyPaneWatchAppendPartialAndRewrites(t *testing.T) {
 		t.Fatalf("truncated JSON was visible: %+v", got)
 	}
 	agyTestAppend(t, file, record[len(record)-1:]) // Valid JSON is still incomplete until the newline.
-	time.Sleep(2 * watchEvery)
+	n.mu.Lock()
+	w := n.watches[agyTestRow]
+	n.mu.Unlock()
+	n.pollAgyPane(w) // one read after the append, as the pump's next tick would do
 	if got, _ := agyTestItems(t, n, agyTestRow, nil); len(got) != 1 || len(hub.spans()) != 0 {
 		t.Fatalf("partial record was visible: page %+v, batches %+v", got, hub.spans())
 	}
@@ -274,8 +276,11 @@ func TestAgyPaneWatchAppendPartialAndRewrites(t *testing.T) {
 
 	agyTestCall(t, n, "session.unwatch", agyTestRow, nil)
 	agyTestAppend(t, file, `{"step_index":3,"type":"PLANNER_RESPONSE","content":"After unwatch"}`+"\n")
-	time.Sleep(2 * watchEvery)
-	if got := hub.spans(); len(got) != 5 {
+	n.mu.Lock()
+	_, watched := n.watches[agyTestRow]
+	n.mu.Unlock()
+	n.pollAgyPane(w) // a read the pump had already started for the ended watch pushes nothing
+	if got := hub.spans(); watched || len(got) != 5 {
 		t.Fatalf("watch pushed after unwatch: %+v", got)
 	}
 }
