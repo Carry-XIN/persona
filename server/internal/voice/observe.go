@@ -440,7 +440,8 @@ func (t *tracker) untilTriaged(ctx context.Context, r *voiceRun, s *proto.Sessio
 	if s.TurnErrorKind == proto.TurnErrorTransient && r.Seen { // not an earlier turn's
 		r.transient = true
 	}
-	failed := strings.TrimSpace(s.TurnError) != "" && s.TurnErrorKind != proto.TurnErrorUser
+	// The hub's word on a turn with no output (proto.SilentTurnKind) is no model error the triage continues.
+	failed := strings.TrimSpace(s.TurnError) != "" && s.TurnErrorKind != proto.TurnErrorUser && !proto.SilentTurnKind(s.TurnErrorKind)
 	switch {
 	case now.Sub(r.stopAt) >= triageWait:
 		return false

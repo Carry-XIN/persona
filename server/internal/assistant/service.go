@@ -812,6 +812,7 @@ func (s *Service) TurnStarted(ctx context.Context, r SessionRef) {
 }
 
 func (s *Service) turnStartedObserved(ctx context.Context, r SessionRef, newTurn bool) {
+	s.quietTurnOver(r.MachineID, r.SessionID) // a turn with no output before this one is over (silent_turns.go)
 	s.taskWorking(ctx, r.MachineID, r.SessionID)
 	s.workStartedObserved(ctx, r.MachineID, r.SessionID, time.Now(), newTurn)
 	s.availTurnStarted(r.MachineID, r.SessionID, newTurn, time.Now())

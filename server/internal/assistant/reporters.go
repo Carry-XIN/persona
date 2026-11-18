@@ -198,7 +198,11 @@ func (s *Service) stopReporting(ctx context.Context, sid, by string) (stopResult
 			if c, ok := s.session(ctx, a.MachineID, a.SessionID); !ok || c.Status != proto.StatusWorking && !c.Starting {
 				continue
 			}
+			// A turn of it that ends with no output now was stopped by the owner, not failed by the model service
+			// (silent_turns.go, #10187). Before the interrupt: the turn may end before the call comes back.
+			s.noteStopped(a.MachineID, a.SessionID)
 			if err := s.call(ctx, a.MachineID, "session.interrupt", map[string]any{"session_id": a.SessionID}, nil); err != nil {
+				s.forgetStop(a.MachineID, a.SessionID)
 				s.logf("stop %s: task %s: agent %s: %v", short(sid), t.ID, short(a.SessionID), err)
 				continue
 			}

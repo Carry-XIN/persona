@@ -1319,7 +1319,7 @@ func (s *Service) describeAgents(ctx context.Context, state, machine, query stri
 	}
 	for _, r := range rows {
 		c := r.c
-		fmt.Fprintf(&b, "- [%s] %s · machine=%s session_id=%s · %s", stateNames[c.State], agentLabel(c), r.m.ID, c.SessionID, c.Cwd)
+		fmt.Fprintf(&b, "- [%s] %s · machine=%s session_id=%s · %s", agentsListState(c), agentLabel(c), r.m.ID, c.SessionID, c.Cwd)
 		if c.SourceKind != "" {
 			fmt.Fprintf(&b, " · source=%s instance=%s", c.SourceKind, c.SourceInstanceID)
 			if c.Capabilities == nil || !c.Capabilities.Send {
@@ -1426,4 +1426,17 @@ func sendParams(session, text string, dismissNotice bool) map[string]any {
 		p["dismiss_notice"] = true
 	}
 	return p
+}
+
+// agentsListState is how agents_list names c's state: as the apps' rows do, except a turn that stopped unfinished on
+// a turn error (the model service cut it off, it had no output, or Persona's Stop interrupted it), which is not "done,
+// not seen" (#10187). A usage limit has its own mark on the line.
+func agentsListState(c proto.Session) string {
+	if c.TurnError == "" || c.TurnErrorKind == proto.TurnErrorUsageLimit || c.State != proto.StateUnread && c.State != proto.StateIdle {
+		return stateNames[c.State]
+	}
+	if c.TurnErrorKind == proto.TurnErrorStopped {
+		return "被停下了，没做完" // i18n-ignore: agents_list output for the model, as the lines around it
+	}
+	return "中断了，没做完" // i18n-ignore: agents_list output for the model, as the lines around it
 }

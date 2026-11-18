@@ -119,6 +119,9 @@ type taskTurn struct {
 	Receipt bool        `json:"receipt,omitempty"`
 	Judged  *turnJudged `json:"judged,omitempty"`
 	Signal  *turnSignal `json:"signal,omitempty"`
+	// Silent: the turn, taken up as interrupted, had no output at all (proto.TurnErrorNoOutput, or
+	// proto.TurnErrorStopped when Persona's Stop interrupted it): what the Agent's row says of it (silent_turns.go).
+	Silent string `json:"silent,omitempty"`
 }
 
 // turnJudged is the judgment written for a turn: the judge's check, the error when it could not say (the supervisor
@@ -314,6 +317,7 @@ func (s *Service) turnsLocked(ctx context.Context) bool {
 		doc.Since = time.Now().UTC()
 	}
 	b.doc, b.loaded = doc, true
+	s.restoreQuietTurns(doc.Turns)
 	if fresh && st != nil { // since when it is kept must outlive this manager
 		if err := st.PutSetting(ctx, taskTurnsKey, b.doc); err != nil {
 			s.logf("task turns: %v", err)

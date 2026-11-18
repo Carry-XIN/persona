@@ -429,6 +429,8 @@ func doneAlert(l i18n.Lang, sess proto.Session) (head, text string) {
 	if e := strings.TrimSpace(sess.TurnError); e != "" && sess.TurnErrorKind == proto.TurnErrorUsageLimit {
 		// Not "the model service failed": the subscription's limit, which the user goes on from after it resets.
 		head, text = "⚠️ "+title, i18n.T(l, "push.usage_limit", i18n.Args{"error": e})
+	} else if e != "" && sess.TurnErrorKind == proto.TurnErrorStopped {
+		head, text = title, e // the owner's own Stop (silent_turns.go): not news of a failure, nor of a finished turn
 	} else if e != "" {
 		head, text = "⚠️ "+title, interruptedSummary+"："+e
 	} else if assistantwire.CutOff(text) {
