@@ -193,14 +193,14 @@ func TestLinkedDeployCapabilities(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			_, m, _, _ := linkedDeployFixture(t, kind)
 			m.info.NodeUpdate = false
-			if s := m.snapshot(); s.CanDeploy == nil || *s.CanDeploy || !strings.Contains(s.DeployReason, "升级一次") {
-				t.Fatalf("old node: %+v", s)
+			if s := m.snapshot(); s.CanDeploy == nil || *s.CanDeploy || !strings.Contains(s.DeployReason, "升级一次") || s.DeployNoPackage {
+				t.Fatalf("old node: %+v", s) // the node itself blocks the update, not a missing package (#10566)
 			}
 			if err := m.startDeploy(); err == nil || !strings.Contains(err.Error(), "升级一次") {
 				t.Fatalf("old node start: %v", err)
 			}
 			m.info.NodeUpdate = true
-			if s := m.snapshot(); s.CanDeploy == nil || !*s.CanDeploy {
+			if s := m.snapshot(); s.CanDeploy == nil || !*s.CanDeploy || s.DeployNoPackage {
 				t.Fatalf("capable node: %+v", s)
 			}
 			m.online = false
