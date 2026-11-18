@@ -366,8 +366,7 @@ func TestQuietTurnKind(t *testing.T) {
 	if !ok {
 		t.Fatal("the Stop's turn end was not noted")
 	}
-	time.Sleep(time.Millisecond)
-	b := time.Now()
+	b := a.Add(time.Minute)                // the next turn's stretch
 	newer := s.noteStopped("box", "s1", b) // registered after that read
 	if at, ok := s.stopFor("box", "s1", a); ok {
 		t.Fatalf("the older look would find the newer Stop: %v", at)
@@ -390,8 +389,9 @@ func TestQuietTurnKind(t *testing.T) {
 
 	// An interrupt that did not go out is taken back, a later one's attempt is not.
 	first := s.noteStopped("box", "s1", a)
-	time.Sleep(time.Millisecond)
-	s.noteStopped("box", "s1", a)
+	if second := s.noteStopped("box", "s1", a); !second.After(first) {
+		t.Fatalf("two attempts share a time: %v %v", first, second)
+	}
 	s.forgetStopAttempt("box", "s1", first)
 	s.stopTurnEnded("box", "s1", time.Now())
 	check("a later attempt stands", []proto.Item{prompt}, a, proto.TurnErrorStopped)
@@ -620,13 +620,15 @@ func TestQuietTurnStopIsTheInterruptedTurns(t *testing.T) {
 		t.Fatalf("turn A: %+v", rb)
 	}
 
-	// Turn B, later, answers nothing: the Stop before A is not its.
-	time.Sleep(5 * time.Millisecond)
+	// Turn B, later, answers nothing: the Stop before A is not its (B's stretch of work begins when its start is
+	// heard, after A's receipt; its rows carry their own Rev and time).
+	stretchA := s.taskStretch(onlyTodo(s))
 	b := done
-	b.Status, b.Rev, b.UpdatedAt = proto.StatusWorking, 3, time.Now()
+	b.Status, b.Rev, b.UpdatedAt = proto.StatusWorking, 3, done.UpdatedAt.Add(time.Second)
 	ft.sessions("box", b)
+	waitFor(t, "turn B's start", func() bool { return !s.taskStretch(onlyTodo(s)).Equal(stretchA) })
 	ft.f.setItems(prompt)
-	b.Status, b.Rev, b.UpdatedAt, b.LastText = proto.StatusDone, 4, time.Now(), ""
+	b.Status, b.Rev, b.UpdatedAt, b.LastText = proto.StatusDone, 4, done.UpdatedAt.Add(2*time.Second), ""
 	ft.sessions("box", b)
 	if rb := receiptOf(t, s, "lark1", id, 2); rb.Cause != causeNoOutput {
 		t.Fatalf("turn B: %+v", rb)

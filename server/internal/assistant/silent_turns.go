@@ -177,7 +177,11 @@ func (s *Service) noteStopped(machine, sid string, stretch time.Time) time.Time 
 			delete(q.stops, ref)
 		}
 	}
-	q.stops[SessionRef{MachineID: machine, SessionID: sid}] = stopMark{at: now, stretch: stretch}
+	ref := SessionRef{MachineID: machine, SessionID: sid}
+	if prev, ok := q.stops[ref]; ok && !now.After(prev.at) {
+		now = prev.at.Add(time.Nanosecond) // a Stop's time is its attempt: never one the attempt before had (a coarse clock)
+	}
+	q.stops[ref] = stopMark{at: now, stretch: stretch}
 	return now
 }
 
