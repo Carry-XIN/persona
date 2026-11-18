@@ -196,6 +196,10 @@ func TestReadCodexDraftAboveHintWithoutStatus(t *testing.T) {
 	for _, tc := range []struct{ name, screen, want string }{
 		{"no status", "› keep this text\n  plan · Main [default]\n  ← for agents · ? for shortcuts\n",
 			"keep this text\nplan · Main [default]\n← for agents · ? for shortcuts"},
+		{"separator continuation", "› keep this\n  · /work/example\n  ? for shortcuts\n",
+			"keep this\n· /work/example\n? for shortcuts"},
+		{"text above a separator continuation", "› keep this\n  some text\n  · /work/example\n  ? for shortcuts\n",
+			"keep this\nsome text\n· /work/example\n? for shortcuts"},
 		{"status too far up", "› keep\n  GPT-6.1-Sol xhigh · /work/example\n  a\n  b\n  c\n  d\n  ? for shortcuts\n",
 			"keep\nGPT-6.1-Sol xhigh · /work/example\na\nb\nc\nd\n? for shortcuts"},
 	} {

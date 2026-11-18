@@ -265,11 +265,17 @@ const codexStatusWrapRows = 4
 
 // codexStatusStart is the first row of the status row that ends right above hint, or -1. A status row wider than
 // the pane wraps onto indented rows, so it is matched with those rows joined back, which also covers a wrap that
-// falls before the path. Rows at or above the › row at i are never part of it.
+// falls before the path. Rows at or above the › row at i are never part of it. The status row starts with the model
+// and its separator, so a row that starts with a separator (a continuation) or has none cannot start it: a draft
+// line such as "some text" above "· /work/example" stays a draft.
 func codexStatusStart(plain []string, i, hint int) int {
 	for k := hint - 1; k > i && k >= hint-codexStatusWrapRows; k-- {
-		if strings.TrimSpace(plain[k]) == "" || !strings.HasPrefix(plain[k], "  ") {
+		t := strings.TrimSpace(plain[k])
+		if t == "" || !strings.HasPrefix(plain[k], "  ") {
 			return -1
+		}
+		if strings.HasPrefix(t, "·") || !strings.Contains(t, " ·") {
+			continue
 		}
 		joined := plain[k]
 		for _, l := range plain[k+1 : hint] {
