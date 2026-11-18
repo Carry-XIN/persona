@@ -107,7 +107,8 @@ func resumeSayable(cmd string) bool {
 
 // agentResumeArgv is the resume_argv for an agent Persona started (Claude, Codex, a compatible CLI, pi, the Cursor
 // CLI, the Antigravity CLI). A Codex, and a work agent herdr detects, gets HERDR_AGENT like Claude. A work agent's
-// command is the one it was started with (`--model` included); pi and agy name their session.
+// command is the one it was started with (`--model` included). Pi names its session, and agy adds a verified
+// conversation ID when available.
 func (n *Node) agentResumeArgv(spec agentLaunch, id string) (argv []string, ok bool) {
 	kind := spec.Agent
 	if kind == "" || kind == "claude" {
@@ -173,10 +174,9 @@ func (n *Node) reportResume(ctx context.Context, h *herdrHost, pane string, spec
 	}
 	reportID := spec.ID
 	if spec.Agent == agyAgent {
-		reportID = n.agyConversationLocked(spec.ID, pane)
-		if reportID == "" || reportID != spec.AgyConversation {
-			n.mu.Unlock()
-			return
+		spec.AgyConversation = n.agyConversationLocked(spec.ID, pane)
+		if spec.AgyConversation != "" {
+			reportID = spec.AgyConversation
 		}
 	}
 	n.mu.Unlock()
@@ -270,9 +270,7 @@ func (n *Node) backfillResume(agents []host.Agent) {
 			if spec.Agent == agyAgent && spec.AgyConversation != agy {
 				spec.AgyConversation, spec.Server = agy, ""
 				n.launches[a.PaneID] = spec
-				if agy != "" {
-					reports = append(reports, a.PaneID)
-				}
+				reports = append(reports, a.PaneID)
 				continue
 			}
 			if spec.Server != "" {
@@ -298,7 +296,7 @@ func (n *Node) backfillResume(agents []host.Agent) {
 		work = append(work, todo{a.PaneID, id, st, kind, agy})
 	}
 	n.mu.Unlock()
-	moved := reports
+	var moved []string
 	if len(recheck) > 0 {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		for _, r := range recheck {
@@ -316,17 +314,20 @@ func (n *Node) backfillResume(agents []host.Agent) {
 		}
 		n.mu.Unlock()
 	}
-	if len(work) == 0 && len(moved) == 0 {
+	if len(work) == 0 && len(moved) == 0 && len(reports) == 0 {
 		return
 	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
-		for _, pane := range moved {
+		for i, pane := range append(moved, reports...) {
 			n.mu.Lock()
 			spec, ok := n.launches[pane]
 			n.mu.Unlock()
 			if ok {
+				if i < len(moved) {
+					n.logf("herdr resume: %s (%s) is on a new herdr server: its resume command again", pane, spec.ID)
+				}
 				n.reportResume(ctx, h, pane, spec)
 			}
 		}

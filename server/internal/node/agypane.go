@@ -63,7 +63,7 @@ func (n *Node) agyConversation(id, pane string) string {
 
 func agyNotice(id string, lang i18n.Lang) agyHistory {
 	return agyHistory{token: "agy-pane:" + id, seq: 1, items: []proto.Item{{
-		ID: "agy#0", Seq: 1, Role: "system", Kind: "notice", Text: i18n.T(lang, "node-engine.agy_pane_integration"),
+		ID: "agy#0", Seq: 1, Role: "system", Kind: "notice", Text: i18n.T(lang, "node-engine.agy_pane_integration"), TS: time.Now().UTC(),
 	}}}
 }
 
@@ -109,7 +109,7 @@ func (n *Node) agyRead(root *os.Root, key, conversation string, previous os.File
 	n.agyRevisions.put(key, rev)
 	n.mu.Unlock()
 
-	h := mapAgySteps(steps)
+	h := mapAgySteps(steps, info.ModTime())
 	h.token = empty.token
 	if rev.branch != "" || rev.native != "" || rev.rewrite != "" {
 		h.token += ":" + rev.branch + ":" + rev.native + ":" + rev.rewrite

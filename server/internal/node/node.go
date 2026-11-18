@@ -952,7 +952,8 @@ func (n *Node) handle(ctx context.Context, method string, params json.RawMessage
 			return res, err
 		}
 	} else if a, ok := n.agent(p.SessionID); ok && (a.Agent == cursorAgent || a.Agent == agyAgent) {
-		// Herdr drives the pane. Agy can also read the conversation the pane reports.
+		// Herdr drives the pane (workagent.go). Messages go through agent.prompt, and Persona sends Esc through
+		// herdr to interrupt. Agy reads the verified pane conversation when available. Cursor shows a terminal notice.
 		if res, err, handled := n.workAgentCalls(ctx, method, p.SessionID, a, params); handled {
 			return res, err
 		}

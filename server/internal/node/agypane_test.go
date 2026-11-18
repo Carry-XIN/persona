@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-
 	"os"
 	"path/filepath"
 	"strings"
@@ -160,6 +159,22 @@ func TestAgyPaneConversationIsolation(t *testing.T) {
 		}
 	}
 	assertMissingItem(row2, items[0].ID)
+	t.Run("snapshot_mismatch", func(t *testing.T) {
+		n.mu.Lock()
+		row := n.agents[row2]
+		stale := *row.AgentSession
+		stale.Value = "33333333-4444-4555-8666-777777777777"
+		row.AgentSession = &stale
+		// Leave the raw snapshot untouched so the merged row disagrees with its pane's report.
+		n.agents[row2] = row
+		n.mu.Unlock()
+		got, _ := agyTestItems(t, n, row2, nil)
+		if len(got) != 1 || got[0].Kind != "notice" {
+			t.Fatalf("snapshot mismatch: %+v", got)
+		}
+		assertMissingItem(row2, items[0].ID)
+		assertMissingItem(row2, other[0].ID)
+	})
 	for _, tc := range []struct{ name, kind, source, agent, id string }{
 		{name: "missing"},
 		{"path kind", "path", "herdr:antigravity_cli", "agy", agyOtherTestID},
@@ -176,7 +191,7 @@ func TestAgyPaneConversationIsolation(t *testing.T) {
 			}
 			seedAgents(t, n, f, first, second)
 			got, _ := agyTestItems(t, n, row2, nil)
-			if len(got) != 1 || got[0].Kind != "notice" || !strings.Contains(got[0].Text, "herdr integration install antigravity-cli") {
+			if len(got) != 1 || got[0].Kind != "notice" || got[0].TS.IsZero() || !strings.Contains(got[0].Text, "herdr integration install antigravity-cli") {
 				t.Fatalf("terminal notice: %+v", got)
 			}
 			assertMissingItem(row2, items[0].ID)
@@ -207,12 +222,17 @@ func TestAgyPaneWatchAppendPartialAndRewrites(t *testing.T) {
 	t.Cleanup(func() { n.unwatch(agyTestRow) })
 
 	line := fmt.Sprintf(planner, "Draft")
-	agyTestAppend(t, file, line[:len(line)-3])
+	record := strings.TrimSuffix(line, "\n")
+	agyTestAppend(t, file, record[:len(record)-1])
+	if got, _ := agyTestItems(t, n, agyTestRow, nil); len(got) != 1 {
+		t.Fatalf("truncated JSON was visible: %+v", got)
+	}
+	agyTestAppend(t, file, record[len(record)-1:]) // Valid JSON is still incomplete until the newline.
 	time.Sleep(2 * watchEvery)
 	if got, _ := agyTestItems(t, n, agyTestRow, nil); len(got) != 1 || len(hub.spans()) != 0 {
 		t.Fatalf("partial record was visible: page %+v, batches %+v", got, hub.spans())
 	}
-	agyTestAppend(t, file, line[len(line)-3:])
+	agyTestAppend(t, file, "\n")
 	waitFor(t, "the complete record", func() bool { return len(hub.spans()) >= 1 })
 	draft := hub.got()[0]
 	if batch := hub.spans()[0]; draft.Text != "Draft" || batch.fromSeq != 1 || batch.toSeq != 2 || batch.history != page["history"] {
@@ -260,27 +280,127 @@ func TestAgyPaneWatchAppendPartialAndRewrites(t *testing.T) {
 	}
 }
 
+func TestAgyPaneWatchConversationIsolation(t *testing.T) {
+	n, home := testNode(t)
+	t.Setenv("ANTIGRAVITY_CLI_CONFIG_DIR", "")
+	agent := func(pane, id string) host.Agent {
+		a := host.Agent{PaneID: pane, Agent: agyAgent, Cwd: home}
+		if id != "" {
+			a.AgentSession = &host.AgentSession{Kind: "id", Value: id, Agent: agyAgent, Source: "herdr:antigravity_cli"}
+		}
+		return a
+	}
+	setSnapshot := func(pane host.Agent, others ...host.Agent) {
+		n.mu.Lock()
+		n.hostAgents = map[string][]host.Agent{host.Herdr: append([]host.Agent{pane}, others...)}
+		n.agents[agyTestRow] = pane
+		n.mu.Unlock()
+	}
+	const user = `{"step_index":0,"type":"USER_INPUT","content":%q}` + "\n"
+	agyTestFile(t, n.agyDataRoot(), agyTestID, fmt.Sprintf(user, "first conversation"))
+	agyTestFile(t, n.agyDataRoot(), agyOtherTestID, fmt.Sprintf(user, "second conversation"))
+	first := agent(agyTestPane, agyTestID)
+	setSnapshot(first)
+	items, page := agyTestItems(t, n, agyTestRow, nil)
+	if len(items) != 1 || items[0].Text != "first conversation" {
+		t.Fatalf("initial page: %+v", page)
+	}
+	hub := withHub(t, n)
+	agyTestCall(t, n, "session.watch", agyTestRow, map[string]any{"since_seq": page["to_seq"]})
+	t.Cleanup(func() { n.unwatch(agyTestRow) })
+	const noticeKey = "node-engine.agy_pane_integration"
+	noticeText := i18n.T(i18n.En, noticeKey)
+	noticeToken := "agy-pane:" + agyTestRow
+	firstToken := page["history"].(string)
+	for i, tc := range []struct {
+		name                string
+		pane                host.Agent
+		others              []host.Agent
+		kind, text, history string
+	}{
+		{"ambiguous", first, []host.Agent{agent("w1:p2", agyTestID)}, "notice", noticeText, noticeToken},
+		{"verified again", first, nil, "text", "first conversation", firstToken},
+		{"ID disappeared", agent(agyTestPane, ""), nil, "notice", noticeText, noticeToken},
+		{"ID returned", first, nil, "text", "first conversation", firstToken},
+		{"switched conversation", agent(agyTestPane, agyOtherTestID), nil, "text", "second conversation", "agy-pane:" + agyOtherTestID + ":steps"},
+	} {
+		setSnapshot(tc.pane, tc.others...)
+		waitFor(t, tc.name, func() bool { return len(hub.spans()) >= i+1 })
+		batches, got := hub.spans(), hub.got()
+		want := pushed{n: 1, history: tc.history, fromSeq: 0, toSeq: 1}
+		if len(batches) != i+1 || batches[i] != want || len(got) != i+1 || got[i].Kind != tc.kind || got[i].Text != tc.text || got[i].TS.IsZero() {
+			t.Fatalf("%s: batches %+v, items %+v", tc.name, batches, got)
+		}
+	}
+	if got := hub.got(); got[len(got)-1].ID == items[0].ID {
+		t.Fatal("new conversation reused an item ID from the previous conversation")
+	}
+}
+
+func assertAgyResumeReport(t *testing.T, f *fakeHerdr, index int, model, conversation string) {
+	t.Helper()
+	wantID, wantCommand := agyTestRow, "agy --model "+model
+	if conversation != "" {
+		wantID = conversation
+		wantCommand += " --conversation " + conversation
+	}
+	waitFor(t, "the agy resume report", func() bool { return len(f.trace("pane.report_agent_session")) > index })
+	got := f.trace("pane.report_agent_session")
+	if len(got) != index+1 || !strings.Contains(got[index], `"agent_session_id":"`+wantID+`"`) ||
+		!strings.Contains(got[index], wantCommand+`"`) || (conversation == "" && strings.Contains(got[index], "--conversation")) {
+		t.Fatalf("want report %d with session ID %s and command %q, got %v", index, wantID, wantCommand, got)
+	}
+}
+
 func TestAgyPaneResumeAndTerminalControls(t *testing.T) {
 	n, f, home := herdrNode(t)
 	without := agyTestAgent(agyTestPane, home, "")
 	seedAgents(t, n, f, without)
-	n.noteWorkAgent(context.Background(), n.hosts.Get(host.Herdr).(*herdrHost), agyTestPane, agyTestRow, home, agyAgent, agyAgent, "")
-	if got := f.trace("pane.report_agent_session"); len(got) != 0 {
-		t.Fatalf("resume report without a verified ID: %v", got)
-	}
+	const model = "test-model"
+	n.noteWorkAgent(context.Background(), n.hosts.Get(host.Herdr).(*herdrHost), agyTestPane, agyTestRow, home, agyAgent, agyAgent, model)
+	assertAgyResumeReport(t, f, 0, model, "")
 	agyTestCall(t, n, "session.send", agyTestRow, map[string]any{"text": "first\nsecond"})
 	agyTestCall(t, n, "session.interrupt", agyTestRow, nil)
 	assertTrace(t, f.trace("agent.prompt", "pane.send_keys", "pane.send_input"), []string{
 		call("agent.prompt", map[string]any{"target": agyTestPane, "text": "first\nsecond"}),
 		sendKeys(agyTestPane, "escape"),
 	})
-	seedAgents(t, n, f, without)
 	f.reply("session.snapshot", snapshot(nil, nil, []any{agyTestAgent(agyTestPane, home, agyTestID)}, nil))
 	listSessions(t, n)
-	waitFor(t, "the backfilled resume argv", func() bool { return len(f.trace("pane.report_agent_session")) > 0 })
-	if got := f.trace("pane.report_agent_session"); len(got) != 1 || !strings.Contains(got[0], `"agent_session_id":"`+agyTestID+`"`) ||
-		!strings.Contains(got[0], "agy --conversation "+agyTestID) || strings.Contains(got[0], agyTestRow) {
-		t.Fatalf("resume report: %v", got)
+	assertAgyResumeReport(t, f, 1, model, agyTestID)
+}
+
+func TestAgyPaneResumeBackfillTracksConversation(t *testing.T) {
+	n, f, home := herdrNode(t)
+	first := agyTestAgent(agyTestPane, home, agyTestID)
+	seedAgents(t, n, f, first)
+	const model = "test-model"
+	n.noteWorkAgent(context.Background(), n.hosts.Get(host.Herdr).(*herdrHost), agyTestPane, agyTestRow, home, agyAgent, agyAgent, model)
+	assertAgyResumeReport(t, f, 0, model, agyTestID)
+
+	second := agyTestAgent(agyTestPane, home, agyOtherTestID)
+	f.reply("session.snapshot", snapshot(nil, nil, []any{second}, nil))
+	listSessions(t, n)
+	assertAgyResumeReport(t, f, 1, model, agyOtherTestID)
+
+	duplicate := agyTestAgent("w1:p2", home, agyOtherTestID)
+	f.reply("session.snapshot", snapshot(nil, nil, []any{second, duplicate}, nil))
+	listSessions(t, n)
+	assertAgyResumeReport(t, f, 2, model, "")
+}
+
+func TestAgyPaneResumeRejectsAmbiguousReports(t *testing.T) {
+	for _, tc := range []struct{ name, pane, id string }{
+		{"conflicting_reports", agyTestPane, agyOtherTestID},
+		{"duplicate_id", "w1:p2", agyTestID},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			n, f, home := herdrNode(t)
+			seedAgents(t, n, f, agyTestAgent(agyTestPane, home, agyTestID), agyTestAgent(tc.pane, home, tc.id))
+			const model = "test-model"
+			n.noteWorkAgent(context.Background(), n.hosts.Get(host.Herdr).(*herdrHost), agyTestPane, agyTestRow, home, agyAgent, agyAgent, model)
+			assertAgyResumeReport(t, f, 0, model, "")
+		})
 	}
 }
 

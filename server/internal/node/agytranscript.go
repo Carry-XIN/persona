@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/nwverse/persona/server/internal/compat"
 	"github.com/nwverse/persona/server/internal/lazyre"
 	"github.com/nwverse/persona/server/internal/proto"
 	"github.com/nwverse/persona/server/internal/transcript"
@@ -32,10 +34,6 @@ type agyStep struct {
 		Name string          `json:"name"`
 		Args json.RawMessage `json:"args"`
 	} `json:"tool_calls"`
-	Media []*struct {
-		Mime string `json:"mime_type"`
-	} `json:"media"`
-
 	seq    int
 	key    string
 	record [32]byte
@@ -134,24 +132,68 @@ func parseAgySteps(raw []byte, conversation string) ([]agyStep, agyRevision) {
 				steps = steps[:len(steps)-1]
 			}
 		}
+		// Pane item IDs deliberately differ from the companion's. Mixing in the conversation
+		// isolates IDs across pane session switches, and named suffixes survive step completions.
 		step.key = strconv.Itoa(step.seq) + "@" + agyDigest(conversation+"\n"+step.CreatedAt+"\n"+rev.branch)
 		steps = append(steps, step)
 	}
 	return steps, rev
 }
 
-var agyUserRequest = lazyre.New(`(?s)<USER_REQUEST>(.*?)</USER_REQUEST>`)
-var agyContextEnd = lazyre.New(`(?i)^\s*</(?:persona|jarvis)-context>\s*`)
+// Match the whitespace used by JavaScript's \s and String.trim in cleanUserText.
+const agyJSWhitespace = `\x09-\x0D\x20\x{00A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}`
+const agySpace = `[` + agyJSWhitespace + `]`
+
+var agyUserRequest = lazyre.New(`(?s)<USER_REQUEST>` + agySpace + `*(.*?)` + agySpace + `*</USER_REQUEST>`)
+
+// Go regexp has no backreferences. Use one alternative per context tag (compat.ContextNames: the current and older
+// names, as the companion's SNAPSHOT_RE).
+var agySnapshot = lazyre.New(`(?s)(?:` + agyContextBlocks() + `|<persona-view-errors\b[^>]*>.*?</persona-view-errors>)` + agySpace + `*`)
+
+// Keep s/S ASCII-only as in the companion's case-insensitive regexp (Go's (?i) would also match ſ).
+var agyContextEnd = lazyre.New(`^` + agySpace + `*(?i:</)(?:` + agyContextEndNames() + `)(?i:>)` + agySpace + `*`)
+
+func agyContextBlocks() string {
+	var alt []string
+	for _, n := range compat.ContextNames() {
+		q := regexp.QuoteMeta(n)
+		alt = append(alt, `<`+q+`>.*?</`+q+`>`)
+	}
+	return strings.Join(alt, "|")
+}
+
+func agyContextEndNames() string {
+	var alt []string
+	for _, n := range compat.ContextNames() {
+		var b strings.Builder
+		for _, r := range n {
+			switch {
+			case r == 's' || r == 'S':
+				b.WriteString(`[sS]`)
+			case r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z':
+				b.WriteString(`(?i:` + string(r) + `)`)
+			default:
+				b.WriteString(regexp.QuoteMeta(string(r)))
+			}
+		}
+		alt = append(alt, b.String())
+	}
+	return strings.Join(alt, "|")
+}
+
+var agyTrimSpace = lazyre.New(`^` + agySpace + `+|` + agySpace + `+$`)
 
 func agyUserText(text string) string {
 	if m := agyUserRequest.FindStringSubmatch(text); m != nil {
 		text = m[1]
 	}
-	text = transcript.StripInjected(text)
-	for agyContextEnd.MatchString(text) {
-		text = agyContextEnd.ReplaceAllString(text, "")
+	for {
+		clean := agyContextEnd.ReplaceAllString(agySnapshot.ReplaceAllString(text, ""), "")
+		if clean == text {
+			return agyTrimSpace.ReplaceAllString(text, "")
+		}
+		text = clean
 	}
-	return text
 }
 
 func agyToolOutput(text string) string {
@@ -163,12 +205,19 @@ func agyToolOutput(text string) string {
 	return text
 }
 
-func mapAgySteps(steps []agyStep) agyHistory {
+func mapAgySteps(steps []agyStep, fallback time.Time) agyHistory {
 	var history agyHistory
 	var pending []string
+	if fallback.IsZero() {
+		fallback = time.Now()
+	}
+	fallback = fallback.UTC()
 	for _, step := range steps {
 		history.seq = step.seq
-		at, _ := time.Parse(time.RFC3339Nano, step.CreatedAt)
+		at, err := time.Parse(time.RFC3339Nano, step.CreatedAt)
+		if err != nil || at.IsZero() {
+			at = fallback
+		}
 		add := func(suffix, role, kind, text string) *proto.Item {
 			history.items = append(history.items, proto.Item{ID: step.key + "#" + suffix, Seq: step.seq,
 				Role: role, Kind: kind, TS: at, Text: text})
@@ -217,12 +266,7 @@ func mapAgySteps(steps []agyStep) agyHistory {
 					break
 				}
 			}
-			for i, media := range step.Media {
-				if media != nil && strings.HasPrefix(media.Mime, "image/") {
-					image := add("img"+strconv.Itoa(i), "user", proto.KindImage, "")
-					image.Image = &proto.Image{Mime: media.Mime, Lazy: true}
-				}
-			}
+			// Pane transcripts omit media because they have no session.image handler.
 		case "ERROR_MESSAGE":
 			text := step.Error
 			if text == "" {
@@ -244,7 +288,7 @@ var agyToolNames = map[string]string{
 	"run_command": "Bash", "view_file": "Read", "read_file": "Read", "write_to_file": "Write", "write_file": "Write",
 	"replace_file_content": "Edit", "edit_file": "Edit", "grep_search": "Grep", "find_by_name": "Glob",
 	"search_web": "WebSearch", "read_url_content": "WebFetch", "ask_question": "AskUserQuestion", "invoke_subagent": "Agent",
-	"bash": "Bash", "read": "Read", "write": "Write", "edit": "Edit", "grep": "Grep", "glob": "Glob",
+	"bash": "Bash", "read": "Read", "write": "Write", "edit": "Edit", "multi_edit": "MultiEdit", "ls": "LS", "grep": "Grep", "glob": "Glob",
 	"web_fetch": "WebFetch", "web_search": "WebSearch", "todo_write": "TodoWrite",
 }
 
@@ -255,6 +299,9 @@ func agyTool(name string, raw json.RawMessage) (string, json.RawMessage) {
 	appName := agyToolNames[name]
 	if appName == "" {
 		appName = name
+	}
+	if raw = bytes.TrimSpace(raw); len(raw) > 0 && raw[0] == '[' {
+		return appName, raw
 	}
 	var args map[string]any
 	dec := json.NewDecoder(bytes.NewReader(raw))
@@ -293,6 +340,7 @@ func agyTool(name string, raw json.RawMessage) (string, json.RawMessage) {
 		if description == nil {
 			description = "subagent"
 		}
+		// An absent Subagents field renders as an empty prompt. The companion JSON-encodes its empty fallback.
 		prompt := first("Subagents")
 		if _, ok := prompt.(string); !ok {
 			encoded, _ := json.Marshal(prompt)

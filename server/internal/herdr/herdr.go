@@ -396,7 +396,8 @@ func IsBlocked(err error) bool {
 	return errors.As(err, &he) && he.Code == "agent_blocked"
 }
 
-// AgentSession is what an agent integration reported about its session ({kind: "id", value: <session id>}).
+// AgentSession is what an agent integration reported about its session. Source identifies the reporting integration,
+// Agent names the agent, and Kind describes Value (for example, kind "id" carries a session ID).
 type AgentSession struct {
 	Source string `json:"source"`
 	Agent  string `json:"agent"`

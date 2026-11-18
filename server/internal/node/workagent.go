@@ -70,8 +70,8 @@ func workAgentCommand(launcher, program, model string) string {
 }
 
 // workAgentResume is how herdr resumes one Persona started: the same command with the session it was, when the agent
-// has a session id Persona can hand back. Pi uses the session reported by its integration, and agy uses the
-// native conversation ID. Cursor starts again.
+// has a session id Persona can hand back. Pi uses the session file reported by herdr's pi integration. Agy uses a
+// verified native conversation ID when available. Without one, agy starts a new conversation. Cursor starts fresh.
 func workAgentResume(kind, cmd, id string) string {
 	if kind == piAgent && id != "" {
 		return cmd + " --session " + dquote(id)
@@ -350,8 +350,10 @@ func (n *Node) reportedWorkAgent(pane, kind string) (id string, ambiguous bool) 
 	return id, false
 }
 
-// workAgentCalls serves a hub call for a Cursor or agy session in herdr. Herdr
-// delivers prompts and interrupts. The pane's own calls fall through to the node.
+// workAgentCalls serves a hub call for a Cursor or agy session herdr runs. A message goes through herdr's
+// agent.prompt (never typed blind), and Persona interrupts by sending Esc through herdr. Agy reads the
+// verified pane conversation when available. A page for Cursor is a terminal notice. The pane's own calls
+// (keys, screen, close) fall through to the node.
 func (n *Node) workAgentCalls(ctx context.Context, method, id string, a host.Agent, params json.RawMessage) (any, error, bool) {
 	if a.Agent == agyAgent {
 		if res, err, handled := n.agyPaneCall(ctx, method, id, a.PaneID, params); handled {
