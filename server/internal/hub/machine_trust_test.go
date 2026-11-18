@@ -259,6 +259,9 @@ func TestMachineErrorCode(t *testing.T) {
 		{"online", proto.Machine{Online: true}, kindLink, ""},
 		{"online, another build it can update", proto.Machine{Online: true, NodeMismatch: true, CanDeploy: &yes}, kindLink, ""},
 		{"online, too old to update from here", proto.Machine{Online: true, NodeMismatch: true, CanDeploy: &no}, kindLink, errCodeNodeOutdated},
+		{"online, the hub has no build for it", proto.Machine{Online: true, NodeMismatch: true, CanDeploy: &no, DeployNoPackage: true}, kindLink, ""}, // #10566
+		{"online, incompatible, no build for it", proto.Machine{Online: true, NodeMismatch: true, CanDeploy: &no, DeployNoPackage: true,
+			NodeIncompatible: "node_protocol_old"}, kindLink, errCodeNodeOutdated},
 		{"the hub's own machine", proto.Machine{Online: true, NodeMismatch: true, CanDeploy: &no}, "local", ""},
 		{"node service down", proto.Machine{Error: "Persona Link: 本机的常驻 node 没在运行（/home/u/.persona/node-attach.sock 连不上）：persona-link node install",
 			LastSeen: seen}, kindLink, errCodeNodeServiceDown},
@@ -337,23 +340,4 @@ func TestPendingComputersUnreadable(t *testing.T) {
 		t.Fatal("the pending one was lost")
 	}
 	_ = database.ForgetMachineTrust(ctx, "trust-a")
-}
-
-// An online node of another build that cannot be updated from here is told to reinstall only when the node itself
-// blocks the update: not when the hub has no build for its platform (#10566), and not when it can be updated.
-func TestNodeOutdatedOnlyWhenTheNodeBlocksTheUpdate(t *testing.T) {
-	no, yes := false, true
-	for _, tc := range []struct {
-		name string
-		m    proto.Machine
-		want string
-	}{
-		{"no package for its platform", proto.Machine{Online: true, NodeMismatch: true, CanDeploy: &no, DeployNoPackage: true}, ""},
-		{"package available", proto.Machine{Online: true, NodeMismatch: true, CanDeploy: &yes}, ""},
-		{"node without an updater", proto.Machine{Online: true, NodeMismatch: true, CanDeploy: &no}, errCodeNodeOutdated},
-	} {
-		if got := machineErrorCode(tc.m, kindLink); got != tc.want {
-			t.Errorf("%s: %q, want %q", tc.name, got, tc.want)
-		}
-	}
 }
