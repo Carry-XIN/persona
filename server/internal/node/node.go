@@ -138,6 +138,7 @@ type Node struct {
 	projectGlobs atomic.Int64
 	listPush     listPush // the list pushes sends ask for, one build at a time (notifySessionsSoon)
 	watches      map[string]*watch
+	agyRevisions *lru[string, agyRevision]
 	// pumping: the shared watch pump runs (session_watch.go watchPump); it stops when watches is empty.
 	pumping bool
 	// waiting: watches of sessions with no transcript yet (watchFor), so session.unwatch finds them (#5389).
@@ -951,8 +952,7 @@ func (n *Node) handle(ctx context.Context, method string, params json.RawMessage
 			return res, err
 		}
 	} else if a, ok := n.agent(p.SessionID); ok && (a.Agent == cursorAgent || a.Agent == agyAgent) {
-		// herdr drives the pane (workagent.go): a message is agent.prompt, an interrupt is Esc. The conversation
-		// itself is not read here, so a page is one notice saying so.
+		// Herdr drives the pane. Agy can also read the conversation the pane reports.
 		if res, err, handled := n.workAgentCalls(ctx, method, p.SessionID, a, params); handled {
 			return res, err
 		}

@@ -37,6 +37,7 @@ type agentLaunch struct {
 	Display                          string // the live replies plugin's directory, "" for none (liveRepliesPlugin)
 	Plugins                          bool   // claude loads plugins: Persona's plugin directory and office rule
 	ID                               string
+	AgyConversation                  string // native ID verified for this pane, separate from the Persona row ID
 	// Server is the herdr server instance (herdr.Client.ServerID) that last took the resume command; "" before. A
 	// pane whose server changed since (a restart, a live handoff, an upgrade from a herdr older than 0.9.2, which
 	// ignored resume_argv) is reported again by backfillResume.
@@ -106,7 +107,7 @@ func resumeSayable(cmd string) bool {
 
 // agentResumeArgv is the resume_argv for an agent Persona started (Claude, Codex, a compatible CLI, pi, the Cursor
 // CLI, the Antigravity CLI). A Codex, and a work agent herdr detects, gets HERDR_AGENT like Claude. A work agent's
-// command is the one it was started with (`--model` included); pi's names its session, the others start again.
+// command is the one it was started with (`--model` included); pi and agy name their session.
 func (n *Node) agentResumeArgv(spec agentLaunch, id string) (argv []string, ok bool) {
 	kind := spec.Agent
 	if kind == "" || kind == "claude" {
@@ -114,7 +115,11 @@ func (n *Node) agentResumeArgv(spec agentLaunch, id string) (argv []string, ok b
 	}
 	cmd := withHerdrAgent(resumeHerdrAgent(kind), n.launcherCommandQ(spec.Launcher, dquote)+" resume "+id)
 	if _, program, ok := workAgent(kind); ok {
-		cmd = withHerdrAgent(resumeHerdrAgent(kind), workAgentResume(kind, workAgentCommand(spec.Launcher, program, spec.Model), id))
+		resumeID := id
+		if kind == agyAgent {
+			resumeID = spec.AgyConversation
+		}
+		cmd = withHerdrAgent(resumeHerdrAgent(kind), workAgentResume(kind, workAgentCommand(spec.Launcher, program, spec.Model), resumeID))
 	}
 	cmd = n.agentCommand(cmd, dquote, herdrPaneShell())
 	if !resumeSayable(cmd) || (!validID(id) && !runtimeIDRe.MatchString(id)) {
@@ -142,6 +147,9 @@ func (n *Node) holdResume(ctx context.Context, launch host.Launcher, pane, id st
 	}
 	spec.ID = id
 	n.mu.Lock()
+	if spec.Agent == agyAgent {
+		spec.AgyConversation = n.agyConversationLocked(id, pane)
+	}
 	if n.launches == nil {
 		n.launches = map[string]claudeLaunch{}
 	}
@@ -163,6 +171,14 @@ func (n *Node) reportResume(ctx context.Context, h *herdrHost, pane string, spec
 	if cur, ok := n.launches[pane]; ok {
 		spec = cur
 	}
+	reportID := spec.ID
+	if spec.Agent == agyAgent {
+		reportID = n.agyConversationLocked(spec.ID, pane)
+		if reportID == "" || reportID != spec.AgyConversation {
+			n.mu.Unlock()
+			return
+		}
+	}
 	n.mu.Unlock()
 	argv, ok := n.agentResumeArgv(spec, spec.ID)
 	if !ok {
@@ -176,12 +192,12 @@ func (n *Node) reportResume(ctx context.Context, h *herdrHost, pane string, spec
 		agentName = "claude"
 	}
 	server := h.serverID(ctx, host.ParsePane(pane)) // before the report: a server that replaces this one meanwhile is newer
-	if err := h.PaneReportResume(ctx, host.ParsePane(pane), resumeSource, agentName, spec.ID, argv); err != nil {
+	if err := h.PaneReportResume(ctx, host.ParsePane(pane), resumeSource, agentName, reportID, argv); err != nil {
 		n.logf("herdr resume: %s (%s): %v", pane, spec.ID, err)
 		return
 	}
 	n.mu.Lock()
-	if cur, ok := n.launches[pane]; ok && cur.ID == spec.ID {
+	if cur, ok := n.launches[pane]; ok && cur.ID == spec.ID && cur.AgyConversation == spec.AgyConversation {
 		cur.Server = server
 		n.launches[pane] = cur
 	}
@@ -228,10 +244,12 @@ func (n *Node) backfillResume(agents []host.Agent) {
 		id   string
 		st   sessionState
 		kind string
+		agy  string
 	}
 	type held struct{ pane, server string }
 	var work []todo
 	var recheck []held
+	var reports []string
 	n.mu.Lock()
 	for _, a := range agents {
 		if a.PaneID == "" || host.ParsePane(a.PaneID).Kind != host.Herdr {
@@ -241,10 +259,22 @@ func (n *Node) backfillResume(agents []host.Agent) {
 		if id == "" {
 			id = a.SessionID()
 		}
-		if !validID(id) {
+		var agy string
+		if a.Agent == agyAgent {
+			id = otherSession(a)
+			agy = n.agyConversationLocked(id, a.PaneID)
+		} else if !validID(id) {
 			continue
 		}
 		if spec, ok := n.launches[a.PaneID]; ok && spec.ID == id {
+			if spec.Agent == agyAgent && spec.AgyConversation != agy {
+				spec.AgyConversation, spec.Server = agy, ""
+				n.launches[a.PaneID] = spec
+				if agy != "" {
+					reports = append(reports, a.PaneID)
+				}
+				continue
+			}
 			if spec.Server != "" {
 				recheck = append(recheck, held{a.PaneID, spec.Server})
 			}
@@ -264,11 +294,11 @@ func (n *Node) backfillResume(agents []host.Agent) {
 		if n.launches == nil {
 			n.launches = map[string]agentLaunch{}
 		}
-		n.launches[a.PaneID] = agentLaunch{Agent: kind, Launcher: st.Launcher, Model: st.Model, ID: id} // claimed: once
-		work = append(work, todo{a.PaneID, id, st, kind})
+		n.launches[a.PaneID] = agentLaunch{Agent: kind, Launcher: st.Launcher, Model: st.Model, ID: id, AgyConversation: agy} // claimed: once
+		work = append(work, todo{a.PaneID, id, st, kind, agy})
 	}
 	n.mu.Unlock()
-	var moved []string
+	moved := reports
 	if len(recheck) > 0 {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		for _, r := range recheck {
@@ -297,7 +327,6 @@ func (n *Node) backfillResume(agents []host.Agent) {
 			spec, ok := n.launches[pane]
 			n.mu.Unlock()
 			if ok {
-				n.logf("herdr resume: %s (%s) is on a new herdr server: its resume command again", pane, spec.ID)
 				n.reportResume(ctx, h, pane, spec)
 			}
 		}
@@ -308,10 +337,10 @@ func (n *Node) backfillResume(agents []host.Agent) {
 				spec = agentLaunch{Agent: w.kind, Launcher: w.st.Launcher, Settings: settings, Hooks: hooks, Display: n.liveRepliesPlugin(hooks),
 					Model: w.st.Model, Plugins: n.claudeLoadsPlugins(ctx), ID: w.id}
 			} else {
-				spec = agentLaunch{Agent: w.kind, Launcher: w.st.Launcher, Model: w.st.Model, ID: w.id}
+				spec = agentLaunch{Agent: w.kind, Launcher: w.st.Launcher, Model: w.st.Model, ID: w.id, AgyConversation: w.agy}
 			}
 			n.mu.Lock()
-			if cur, ok := n.launches[w.pane]; !ok || cur.ID != w.id {
+			if cur, ok := n.launches[w.pane]; !ok || cur.ID != w.id || cur.AgyConversation != w.agy {
 				n.mu.Unlock()
 				continue // moved on meanwhile (a start, a SessionStart): that one reported
 			}

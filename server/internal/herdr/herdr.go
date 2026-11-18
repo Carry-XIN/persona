@@ -398,8 +398,10 @@ func IsBlocked(err error) bool {
 
 // AgentSession is what an agent integration reported about its session ({kind: "id", value: <session id>}).
 type AgentSession struct {
-	Kind  string `json:"kind"`
-	Value string `json:"value"`
+	Source string `json:"source"`
+	Agent  string `json:"agent"`
+	Kind   string `json:"kind"`
+	Value  string `json:"value"`
 }
 
 type Agent struct {
