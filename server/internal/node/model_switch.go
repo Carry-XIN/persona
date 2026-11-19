@@ -68,24 +68,50 @@ func (e modelUnconfirmed) Error() string {
 // modelLook is the pause between two looks at the screen after typing (a test shortens it).
 var modelLook = 200 * time.Millisecond
 
+// modelRecordMost is how much of the transcript past the typing is read for the switch's record: more than that
+// written since and the record is not looked for any more.
+const modelRecordMost = 4 << 20
+
 // modelRecorded: Claude Code wrote this switch into the transcript at path since offset: the command with its
 // argument, then its output line "Set model to …", which it writes when it runs the command, whatever the screen
-// shows. The argument ties the record to this switch; another switch's record names another model.
-func modelRecorded(path string, offset int64, model string) bool {
+// shows. read is false when the transcript could not be read (looked at again), or holds more than modelRecordMost
+// since offset.
+func modelRecorded(path string, offset int64, model string) (recorded, read bool) {
 	if path == "" {
-		return false
+		return false, false
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return false
+		return false, false
 	}
 	defer f.Close()
 	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return false, false
+	}
+	added, err := io.ReadAll(io.LimitReader(f, modelRecordMost+1))
+	if err != nil || len(added) > modelRecordMost {
+		return false, false
+	}
+	return modelRecordIn(added, model), true
+}
+
+// modelRecordIn: added, what a transcript got since a `/model <model>` was typed, records that command as carried
+// out. The argument ties the record to this switch, and the output must be that command's own: the first one after
+// it, before any other command (a refused switch followed by another the user typed is not this one made).
+func modelRecordIn(added []byte, model string) bool {
+	i := bytes.LastIndex(added, []byte("<command-args>"+model+"</command-args>"))
+	if i < 0 {
 		return false
 	}
-	added, _ := io.ReadAll(io.LimitReader(f, 1<<20))
-	i := bytes.LastIndex(added, []byte("<command-args>"+model+"</command-args>"))
-	return i >= 0 && bytes.Contains(added[i:], []byte("<local-command-stdout>Set model to"))
+	rest := added[i+1:]
+	out := bytes.Index(rest, []byte("<local-command-std"))
+	if out < 0 {
+		return false
+	}
+	if next := bytes.Index(rest, []byte("<command-name>")); next >= 0 && next < out {
+		return false
+	}
+	return bytes.HasPrefix(rest[out:], []byte("<local-command-stdout>Set model to"))
 }
 
 // modelPicker: Claude Code's /model picker is on screen (the command was taken as a bare /model, or a pick is open).
@@ -143,7 +169,14 @@ func (n *Node) takeAwaitedModel(id string) {
 		if err != nil || st.Size() == a.Checked {
 			return
 		}
-		recorded, size = modelRecorded(a.Path, a.Offset, a.Model), st.Size()
+		read := false
+		if recorded, read = modelRecorded(a.Path, a.Offset, a.Model); !read {
+			if st.Size()-a.Offset <= modelRecordMost {
+				return // not read this time: looked at again
+			}
+			expired = true // too much written since: its record is not looked for any more
+		}
+		size = st.Size()
 	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -260,7 +293,7 @@ func (n *Node) setModel(ctx context.Context, id, model string) error {
 	recorded := false
 	for range 15 {
 		time.Sleep(modelLook)
-		if recorded = modelRecorded(record, recordFrom, model); recorded {
+		if recorded, _ = modelRecorded(record, recordFrom, model); recorded {
 			break // Claude Code's own word, whatever the screen shows by now
 		}
 		s, err := n.readPane(ctx, pane, "visible", 60)

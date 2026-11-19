@@ -227,6 +227,32 @@ func shownModelOf(t *testing.T, n *Node) string {
 	return byID(listSessions(t, n))[sidA].Model
 }
 
+// What a transcript got since the typing records the switch only as that command's own output.
+func TestModelRecordIn(t *testing.T) {
+	cmd := func(model string) string {
+		return `{"content":"<command-name>/model</command-name>\n<command-args>` + model + `</command-args>"}` + "\n"
+	}
+	const set = `{"content":"<local-command-stdout>Set model to A</local-command-stdout>"}` + "\n"
+	const refused = `{"content":"<local-command-stderr>Model not found</local-command-stderr>"}` + "\n"
+	for _, tc := range []struct {
+		name, added string
+		want        bool
+	}{
+		{"made", cmd("opus") + set, true},
+		{"typed, not run yet", cmd("opus"), false},
+		{"refused", cmd("opus") + refused, false},
+		{"refused, then another switch made", cmd("opus") + refused + cmd("sonnet") + set, false},
+		{"no output, then another switch made", cmd("opus") + cmd("sonnet") + set, false},
+		{"another model's", cmd("sonnet") + set, false},
+		{"made, after an earlier try refused", cmd("opus") + refused + cmd("opus") + set, true},
+		{"a longer id is another model", cmd("opus[1m]") + set, false},
+	} {
+		if got := modelRecordIn([]byte(tc.added), "opus"); got != tc.want {
+			t.Errorf("%s: %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 // Claude Code's own record of the switch confirms it while the screen does not show it (#10810).
 func TestHerdrSetModelConfirmsFromTheTranscript(t *testing.T) {
 	n, _ := modelSwitchFixture(t, "recorded at once")
@@ -258,6 +284,9 @@ func TestHerdrSetModelTakesALateSwitchFromTheTranscript(t *testing.T) {
 	if got := shownModelOf(t, n); got != "opus" {
 		t.Fatalf("shown once recorded: %q", got)
 	}
+	if got := n.ranExecution(sidA, sessionState{}).Model; got != "opus" {
+		t.Fatalf("the pick a later start goes on with: %q", got)
+	}
 	n.mu.Lock()
 	awaited := n.modes[sidA].Awaited
 	n.mu.Unlock()
@@ -280,6 +309,43 @@ func TestHerdrSetModelTakesALateSwitchFromTheTranscript(t *testing.T) {
 		record("opus")
 		if got := shownModelOf(t, n); got != "claude-sonnet-4" {
 			t.Fatalf("a record after the wait was taken: %q", got)
+		}
+	})
+	t.Run("too much written since", func(t *testing.T) {
+		n, record := modelSwitchFixture(t, "")
+		if err := setModel(t, n, sidA, "opus"); err == nil {
+			t.Fatal("confirmed with nothing to go by")
+		}
+		n.mu.Lock()
+		path := n.modes[sidA].Awaited.Path
+		n.mu.Unlock()
+		file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := file.WriteString(`{"type":"summary","summary":"` + strings.Repeat("x", modelRecordMost) + `"}` + "\n"); err != nil {
+			t.Fatal(err)
+		}
+		file.Close()
+		record("opus")
+		if got := shownModelOf(t, n); got == "opus" {
+			t.Fatalf("a record past the bound was taken: %q", got)
+		}
+		n.mu.Lock()
+		defer n.mu.Unlock()
+		if n.modes[sidA].Awaited != nil {
+			t.Fatal("still awaited past the bound")
+		}
+	})
+	t.Run("another launcher since", func(t *testing.T) {
+		n, record := modelSwitchFixture(t, "")
+		if err := setModel(t, n, sidA, "opus"); err == nil {
+			t.Fatal("confirmed with nothing to go by")
+		}
+		n.noteSwitchedModel(sidA, proto.PendingSwitch{}) // the session moved to another launcher's process
+		record("opus")
+		if got := shownModelOf(t, n); got == "opus" {
+			t.Fatalf("the old process's switch shows on the new launcher: %q", got)
 		}
 	})
 	t.Run("refused", func(t *testing.T) {
