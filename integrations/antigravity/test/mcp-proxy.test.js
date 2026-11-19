@@ -55,7 +55,21 @@ describe('MCP proxy (#7333)', { timeout: 15_000 }, () => {
     const res = await call('tools/list', {})
     assert.deepEqual(res.result.tools.map((x) => x.name), ['persona_call'])
     const listed = await call('tools/call', { name: 'persona_call', arguments: {} })
-    assert.match(listed.result.content[0].text, /- mail_accounts: List mail accounts Arguments: \{"properties":\{"id":\{"type":"string"\}\},"required":\["id"\]\}/)
+    assert.match(listed.result.content[0].text, /- mail_accounts: List mail accounts Arguments: \{"type":"object","properties":\{"id":\{"type":"string"\}\},"required":\["id"\]\}/)
+  })
+
+  it('lists a left-out tool with its whole input schema, references and alternatives included (#10756)', async (t) => {
+    const schema = {
+      type: 'object',
+      $defs: { when: { type: 'string', enum: ['now', 'later'] } },
+      properties: { at: { $ref: '#/$defs/when' }, target: { anyOf: [{ type: 'string' }, { type: 'integer' }] } },
+      additionalProperties: false,
+    }
+    const { call } = proxied(t, [{ name: 'cancel_followup', description: 'Cancel', inputSchema: schema }])
+    await call('tools/list', {})
+    const listed = await call('tools/call', { name: 'persona_call', arguments: {} })
+    const line = listed.result.content[0].text.split('\n').find((l) => l.startsWith('- cancel_followup:'))
+    assert.deepEqual(JSON.parse(line.slice(line.indexOf('Arguments: ') + 'Arguments: '.length)), schema)
   })
 
   it('declares no tool smaller than persona_call, so agy never defers it (#10756)', async (t) => {
@@ -71,7 +85,7 @@ describe('MCP proxy (#7333)', { timeout: 15_000 }, () => {
     // The tools left out are still listed, with their arguments, and callable through it.
     const listed = await call('tools/call', { name: 'persona_call', arguments: {} })
     assert.match(listed.result.content[0].text, /connector_read_0, .*connector_read_39, todo_create/)
-    assert.match(listed.result.content[0].text, /- connector_read_7: Read one thing Arguments: \{"properties":\{\}\}/)
+    assert.match(listed.result.content[0].text, /- connector_read_7: Read one thing Arguments: \{"type":"object","properties":\{\}\}/)
     assert.doesNotMatch(listed.result.content[0].text, /- todo_create:/)
     const via = await call('tools/call', { name: 'persona_call', arguments: { name: 'connector_read_7', arguments: {} } })
     assert.deepEqual(JSON.parse(via.result.content[0].text), { name: 'connector_read_7', args: {} })

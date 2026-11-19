@@ -71,8 +71,10 @@ createInterface({ input: child.stdout, crlfDelay: Infinity }).on('line', (line) 
       names = tools.map((t) => t.name)
       const all = tools.map((tool) => ({ ...tool, inputSchema: agyInputSchema(tool.inputSchema) }))
       const declarations = all.filter((tool) => size(tool) > DISPATCH_SIZE) // persona_call stays the smallest (#10756)
-      hidden = all.filter((tool) => size(tool) <= DISPATCH_SIZE)
-        .map((tool) => `- ${tool.name}: ${tool.description || ''} Arguments: ${JSON.stringify({ properties: tool.inputSchema?.properties || {}, required: tool.inputSchema?.required })}`)
+      // Each with its whole input schema as the server gave it ($defs, $ref, anyOf, enums agy cannot represent): this
+      // listing is the only place agy reads their arguments from.
+      hidden = tools.filter((_, i) => size(all[i]) <= DISPATCH_SIZE)
+        .map((tool) => `- ${tool.name}: ${tool.description || ''} Arguments: ${JSON.stringify(tool.inputSchema ?? {})}`)
       line = JSON.stringify({ ...msg, result: { ...msg.result, tools: [...declarations, DISPATCH_TOOL] } })
     }
   }
