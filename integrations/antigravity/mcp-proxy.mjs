@@ -15,7 +15,8 @@ import { agyInputSchema } from './lib/mcp-schema.js'
 const DISPATCH = 'persona_call'
 const DISPATCH_TOOL = {
   name: DISPATCH,
-  description: 'Call any Persona tool not in your list, by name. With no name it lists them, each with its arguments.',
+  description: 'Call any Persona tool not in your list, by name; for a deferred one, read its schema file for the ' +
+    'arguments. With no name it lists the tools, and the arguments of those that have no schema file.',
   inputSchema: {
     type: 'object',
     properties: {
