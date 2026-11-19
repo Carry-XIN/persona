@@ -1,9 +1,11 @@
 package node
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -39,20 +41,67 @@ func modelCommand(model string) (string, error) {
 // modelOutcome reads what Claude Code printed after `/model <model>`: "Set model to …" is the change; a refusal is
 // returned with its words; anything else (the command still in the box, a picker) is not claimed as done.
 func modelOutcome(screen, model string) error {
-	flat := strings.Join(strings.Fields(screen), " ")
-	// Only what follows the command we typed counts: an earlier switch's line stays on screen.
-	if i := strings.LastIndex(flat, "/model "+model); i >= 0 {
-		flat = flat[i:]
-	}
+	flat, _ := afterModelCommand(screen, model)
 	if strings.Contains(flat, "Set model to") {
 		return nil
 	}
-	for _, bad := range []string{"not found", "Invalid model", "invalid model", "Unknown model", "not available", "does not exist"} {
-		if strings.Contains(flat, bad) {
-			return fmt.Errorf("Claude Code 没接受这个模型（%s），请在终端里确认", model)
-		}
+	if modelRefused(flat) {
+		return fmt.Errorf("Claude Code 没接受这个模型（%s），请在终端里确认", model)
 	}
 	return fmt.Errorf("模型可能没切到 %s，请在终端里确认", model)
+}
+
+// afterModelCommand is the screen as one line, from the `/model <model>` typed last: only what follows the command we
+// typed counts, an earlier switch's line stays on screen. typed: the command is on the screen; without it the whole
+// screen comes back, which may be the conversation before a redraw.
+func afterModelCommand(screen, model string) (flat string, typed bool) {
+	flat = strings.Join(strings.Fields(screen), " ")
+	if i := strings.LastIndex(flat, "/model "+model); i >= 0 {
+		return flat[i:], true
+	}
+	return flat, false
+}
+
+// modelRefused: the screen (afterModelCommand's) says Claude Code did not take the model.
+func modelRefused(screen string) bool {
+	for _, bad := range []string{"not found", "Invalid model", "invalid model", "Unknown model", "not available", "does not exist"} {
+		if strings.Contains(screen, bad) {
+			return true
+		}
+	}
+	return false
+}
+
+// modelWait is how many looks, modelLook apart, a switch gets (ten seconds), and modelRefusalLooks how many before a
+// refusal on the screen ends it (three seconds, the whole wait before #10810). A long session's terminal can take
+// longer than three seconds to redraw, or to get to the command, and the switch was then reported as unconfirmed
+// although it had happened.
+const (
+	modelRefusalLooks = 15
+	modelWait         = 50
+)
+
+// modelLook is the pause between two looks (a test shortens it).
+var modelLook = 200 * time.Millisecond
+
+// modelRecorded: Claude Code wrote this switch into the transcript at path since offset: the command with its
+// argument, then its output line "Set model to …", which it writes as the command runs, whatever the screen shows by
+// then. The command ties the record to this switch: an earlier one's late record names another model.
+func modelRecorded(path string, offset int64, model string) bool {
+	if path == "" {
+		return false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return false
+	}
+	added, _ := io.ReadAll(io.LimitReader(f, 1<<20))
+	i := bytes.LastIndex(added, []byte("<command-args>"+model+"</command-args>"))
+	return i >= 0 && bytes.Contains(added[i:], []byte("<local-command-stdout>Set model to"))
 }
 
 // modelPicker: Claude Code's /model picker is on screen (the command was taken as a bare /model, or a pick is open).
@@ -148,7 +197,12 @@ func (n *Node) setModel(ctx context.Context, id, model string) error {
 	if err := n.checkPane(ctx, pane, "claude", ""); err != nil {
 		return err
 	}
-	from := n.transcriptModel(id)
+	// The transcript as it is now: its model, and where it ends. What Claude Code writes after this is its record of
+	// the command typed below.
+	record, from, recordFrom := n.transcriptPath(id), "", int64(0)
+	if st, err := os.Stat(record); record != "" && err == nil {
+		from, recordFrom = n.meta(record, st).model, st.Size()
+	}
 	if err := n.prompt(ctx, pane, cmd); err != nil {
 		if r := deliveryRefusal(err); r != nil {
 			return r
@@ -157,8 +211,12 @@ func (n *Node) setModel(ctx context.Context, id, model string) error {
 	}
 	n.typing.typed(pane, cmd)
 	var last string
-	for range 15 {
-		time.Sleep(200 * time.Millisecond)
+	recorded := false
+	for i := 0; i < modelWait && ctx.Err() == nil; i++ {
+		time.Sleep(modelLook)
+		if recorded = modelRecorded(record, recordFrom, model); recorded {
+			break
+		}
 		s, err := n.readPane(ctx, pane, "visible", 60)
 		if err != nil {
 			continue
@@ -171,9 +229,15 @@ func (n *Node) setModel(ctx context.Context, id, model string) error {
 		if modelOutcome(s, model) == nil {
 			break
 		}
+		// Refused under the command we typed: no record is coming. Words on a screen not redrawn yet prove nothing.
+		if flat, typed := afterModelCommand(s, model); i >= modelRefusalLooks-1 && typed && modelRefused(flat) {
+			break
+		}
 	}
-	if err := modelOutcome(last, model); err != nil {
-		return err
+	if !recorded {
+		if err := modelOutcome(last, model); err != nil {
+			return err
+		}
 	}
 	n.noteModel(id, model, from)
 	n.notifySessions()

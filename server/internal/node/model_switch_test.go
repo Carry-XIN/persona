@@ -1,6 +1,7 @@
 package node
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -181,6 +182,71 @@ func TestHerdrSetModelWaitsForConfirmationAfterTheLatestCommand(t *testing.T) {
 	}
 	if reads != 2 {
 		t.Fatalf("visible reads = %d, want the pending read and the confirmed read", reads)
+	}
+}
+
+// A long session's screen may not show the confirmation in time: Claude Code's own record of the switch in the
+// transcript, written after the command was typed, confirms it, and an older record does not (#10810).
+func TestHerdrSetModelConfirmsFromTheTranscript(t *testing.T) {
+	old := modelLook
+	modelLook = time.Millisecond
+	t.Cleanup(func() { modelLook = old })
+	const reply = `{"type":"assistant","uuid":"a1","message":{"role":"assistant","model":"claude-sonnet-4","content":[{"type":"text","text":"hi"}]}}`
+	recordOf := func(model string) string {
+		return `{"type":"user","uuid":"u1","message":{"role":"user","content":"<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args>` + model + `</command-args>"}}` + "\n" +
+			`{"type":"user","uuid":"u2","message":{"role":"user","content":"<local-command-stdout>Set model to ` + "`A model`" + ` and saved as your default for new sessions</local-command-stdout>"}}`
+	}
+	for _, tc := range []struct {
+		name    string
+		before  []string // the transcript when the switch starts
+		written string   // what Claude Code appends once the command is typed
+		screen  string   // what the screen shows after the typing, never the confirmation
+		reads   int      // the looks at the screen
+		wantErr string
+	}{
+		{"recorded, the screen behind", []string{reply}, recordOf("opus"), "\n❯ /model opus\n", 0, ""},
+		{"an older record only", []string{reply, recordOf("opus")}, "", "\n❯ /model opus\n", modelWait, "可能没切到"},
+		{"an earlier switch's late record", []string{reply}, recordOf("sonnet"), "\n❯ /model opus\n", modelWait, "可能没切到"},
+		{"refused on the screen", []string{reply}, "", "\n❯ /model opus\n  ⎿  Unknown model: opus\n", modelRefusalLooks, "没接受"},
+		{"not redrawn, the conversation says not found", []string{reply}, "", "\n⏺ file not found\n", modelWait, "没接受"}, // waited out, not cut short
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			n, f, home := herdrNode(t)
+			seedAgents(t, n, f, claudeAgent(sidA, proto.StatusIdle, "w1:p1", "w1:t1", "w1", "/tmp/m", ""))
+			path := writeTranscript(t, home, "/tmp/m", sidA, time.Now().Add(-time.Minute), tc.before...)
+			empty, emptyANSI := screenFixture(t, "claude-2.1.312-empty-162.txt"), screenFixture(t, "claude-2.1.312-empty-162.ansi")
+			f.setScreens("w1:p1", empty, emptyANSI)
+			reads := 0
+			f.after(func(c herdrCall) {
+				if c.Method == "agent.prompt" {
+					f.setScreens("w1:p1", empty+tc.screen, emptyANSI)
+					if tc.written != "" {
+						file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+						if err != nil {
+							t.Error(err)
+							return
+						}
+						defer file.Close()
+						if _, err := file.WriteString(tc.written + "\n"); err != nil {
+							t.Error(err)
+						}
+					}
+				}
+				if c.Method == "pane.read" && c.Params["format"] != "ansi" {
+					reads++
+				}
+			})
+			err := setModel(t, n, sidA, "opus")
+			if tc.wantErr == "" && err != nil || tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("err = %v, want %q", err, tc.wantErr)
+			}
+			if reads != tc.reads {
+				t.Errorf("looked at the screen %d times, want %d", reads, tc.reads)
+			}
+			if got := byID(listSessions(t, n))[sidA].Model; tc.wantErr == "" && got != "opus" || tc.wantErr != "" && got != "claude-sonnet-4" {
+				t.Errorf("model shown: %q", got)
+			}
+		})
 	}
 }
 
