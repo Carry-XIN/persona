@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -41,52 +42,35 @@ func modelCommand(model string) (string, error) {
 // modelOutcome reads what Claude Code printed after `/model <model>`: "Set model to …" is the change; a refusal is
 // returned with its words; anything else (the command still in the box, a picker) is not claimed as done.
 func modelOutcome(screen, model string) error {
-	flat, _ := afterModelCommand(screen, model)
+	flat := strings.Join(strings.Fields(screen), " ")
+	// Only what follows the command we typed counts: an earlier switch's line stays on screen.
+	if i := strings.LastIndex(flat, "/model "+model); i >= 0 {
+		flat = flat[i:]
+	}
 	if strings.Contains(flat, "Set model to") {
 		return nil
 	}
-	if modelRefused(flat) {
-		return fmt.Errorf("Claude Code 没接受这个模型（%s），请在终端里确认", model)
-	}
-	return fmt.Errorf("模型可能没切到 %s，请在终端里确认", model)
-}
-
-// afterModelCommand is the screen as one line, from the `/model <model>` typed last: only what follows the command we
-// typed counts, an earlier switch's line stays on screen. typed: the command is on the screen; without it the whole
-// screen comes back, which may be the conversation before a redraw.
-func afterModelCommand(screen, model string) (flat string, typed bool) {
-	flat = strings.Join(strings.Fields(screen), " ")
-	if i := strings.LastIndex(flat, "/model "+model); i >= 0 {
-		return flat[i:], true
-	}
-	return flat, false
-}
-
-// modelRefused: the screen (afterModelCommand's) says Claude Code did not take the model.
-func modelRefused(screen string) bool {
 	for _, bad := range []string{"not found", "Invalid model", "invalid model", "Unknown model", "not available", "does not exist"} {
-		if strings.Contains(screen, bad) {
-			return true
+		if strings.Contains(flat, bad) {
+			return fmt.Errorf("Claude Code 没接受这个模型（%s），请在终端里确认", model)
 		}
 	}
-	return false
+	return modelUnconfirmed{model}
 }
 
-// modelWait is how many looks, modelLook apart, a switch gets (ten seconds), and modelRefusalLooks how many before a
-// refusal on the screen ends it (three seconds, the whole wait before #10810). A long session's terminal can take
-// longer than three seconds to redraw, or to get to the command, and the switch was then reported as unconfirmed
-// although it had happened.
-const (
-	modelRefusalLooks = 15
-	modelWait         = 50
-)
+// modelUnconfirmed is modelOutcome's answer when the screen shows neither the change nor a refusal.
+type modelUnconfirmed struct{ model string }
 
-// modelLook is the pause between two looks (a test shortens it).
+func (e modelUnconfirmed) Error() string {
+	return fmt.Sprintf("模型可能没切到 %s，请在终端里确认", e.model)
+}
+
+// modelLook is the pause between two looks at the screen after typing (a test shortens it).
 var modelLook = 200 * time.Millisecond
 
 // modelRecorded: Claude Code wrote this switch into the transcript at path since offset: the command with its
-// argument, then its output line "Set model to …", which it writes as the command runs, whatever the screen shows by
-// then. The command ties the record to this switch: an earlier one's late record names another model.
+// argument, then its output line "Set model to …", which it writes when it runs the command, whatever the screen
+// shows. The argument ties the record to this switch; another switch's record names another model.
 func modelRecorded(path string, offset int64, model string) bool {
 	if path == "" {
 		return false
@@ -121,9 +105,69 @@ type pendingModel struct {
 // pendingModelTTL bounds how long a pick stands in for the transcript (a switch followed by no reply at all).
 const pendingModelTTL = time.Hour
 
+// awaitedModel is a switch typed into Claude Code that the wait after typing did not confirm. Claude Code can take
+// longer than that wait to run a typed command (twelve seconds were seen on a long session, #10810): the switch is
+// reported as unconfirmed, as before, and when Claude Code's own record of it shows in the transcript it is noted as
+// the pick it is, so the app shows the model the session really runs.
+type awaitedModel struct {
+	Model, From string
+	Path        string // the transcript
+	Offset      int64  // where it ended when the command was typed: only what follows is this command's record
+	Checked     int64  // its size at the last look: looked at again only once it grew
+	At          time.Time
+}
+
+// awaitedModelTTL is how long a typed switch is still looked for.
+const awaitedModelTTL = 5 * time.Minute
+
+func (n *Node) awaitModel(id string, a awaitedModel) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	m := n.modes[id]
+	m.Awaited = &a
+	n.modes[id] = m
+}
+
+// takeAwaitedModel notes an awaited switch as made once Claude Code recorded it, and lets go of one too old.
+func (n *Node) takeAwaitedModel(id string) {
+	n.mu.Lock()
+	a := n.modes[id].Awaited
+	n.mu.Unlock()
+	if a == nil {
+		return
+	}
+	recorded, size := false, a.Checked
+	expired := time.Since(a.At) > awaitedModelTTL
+	if !expired {
+		st, err := os.Stat(a.Path)
+		if err != nil || st.Size() == a.Checked {
+			return
+		}
+		recorded, size = modelRecorded(a.Path, a.Offset, a.Model), st.Size()
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	m := n.modes[id]
+	if m.Awaited != a { // another switch since
+		return
+	}
+	switch {
+	case recorded:
+		m.Awaited, m.Model = nil, &pendingModel{Model: a.Model, From: a.From, At: time.Now()}
+	case expired:
+		m.Awaited = nil
+	default:
+		next := *a
+		next.Checked = size
+		m.Awaited = &next
+	}
+	n.modes[id] = m
+}
+
 // shownModel is the model the session list shows: the app's pick while the transcript has not moved on from the model
 // it had at the switch.
 func (n *Node) shownModel(id, fromTranscript string) string {
+	n.takeAwaitedModel(id)
 	n.mu.Lock()
 	m, ok := n.modes[id]
 	n.mu.Unlock()
@@ -153,7 +197,7 @@ func (n *Node) noteModel(id, model, from string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	m := n.modes[id]
-	m.Model = &pendingModel{Model: model, From: from, At: time.Now()}
+	m.Model, m.Awaited = &pendingModel{Model: model, From: from, At: time.Now()}, nil
 	n.modes[id] = m
 }
 
@@ -202,6 +246,8 @@ func (n *Node) setModel(ctx context.Context, id, model string) error {
 	record, from, recordFrom := n.transcriptPath(id), "", int64(0)
 	if st, err := os.Stat(record); record != "" && err == nil {
 		from, recordFrom = n.meta(record, st).model, st.Size()
+	} else {
+		record = ""
 	}
 	if err := n.prompt(ctx, pane, cmd); err != nil {
 		if r := deliveryRefusal(err); r != nil {
@@ -212,10 +258,10 @@ func (n *Node) setModel(ctx context.Context, id, model string) error {
 	n.typing.typed(pane, cmd)
 	var last string
 	recorded := false
-	for i := 0; i < modelWait && ctx.Err() == nil; i++ {
+	for range 15 {
 		time.Sleep(modelLook)
 		if recorded = modelRecorded(record, recordFrom, model); recorded {
-			break
+			break // Claude Code's own word, whatever the screen shows by now
 		}
 		s, err := n.readPane(ctx, pane, "visible", 60)
 		if err != nil {
@@ -229,13 +275,13 @@ func (n *Node) setModel(ctx context.Context, id, model string) error {
 		if modelOutcome(s, model) == nil {
 			break
 		}
-		// Refused under the command we typed: no record is coming. Words on a screen not redrawn yet prove nothing.
-		if flat, typed := afterModelCommand(s, model); i >= modelRefusalLooks-1 && typed && modelRefused(flat) {
-			break
-		}
 	}
 	if !recorded {
 		if err := modelOutcome(last, model); err != nil {
+			if errors.As(err, &modelUnconfirmed{}) && record != "" {
+				// Typed, and Claude Code may yet run it: its record, when it comes, is taken up (takeAwaitedModel).
+				n.awaitModel(id, awaitedModel{Model: model, From: from, Path: record, Offset: recordFrom, Checked: recordFrom, At: time.Now()})
+			}
 			return err
 		}
 	}

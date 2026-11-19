@@ -185,69 +185,114 @@ func TestHerdrSetModelWaitsForConfirmationAfterTheLatestCommand(t *testing.T) {
 	}
 }
 
-// A long session's screen may not show the confirmation in time: Claude Code's own record of the switch in the
-// transcript, written after the command was typed, confirms it, and an older record does not (#10810).
-func TestHerdrSetModelConfirmsFromTheTranscript(t *testing.T) {
+// modelSwitchFixture is a Claude session in a pane whose screen shows the typed command and never the confirmation,
+// with a transcript that showed claude-sonnet-4 last; record(model) appends Claude Code's record of a /model switch.
+func modelSwitchFixture(t *testing.T, after string) (n *Node, record func(model string)) {
+	t.Helper()
 	old := modelLook
 	modelLook = time.Millisecond
 	t.Cleanup(func() { modelLook = old })
-	const reply = `{"type":"assistant","uuid":"a1","message":{"role":"assistant","model":"claude-sonnet-4","content":[{"type":"text","text":"hi"}]}}`
-	recordOf := func(model string) string {
-		return `{"type":"user","uuid":"u1","message":{"role":"user","content":"<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args>` + model + `</command-args>"}}` + "\n" +
-			`{"type":"user","uuid":"u2","message":{"role":"user","content":"<local-command-stdout>Set model to ` + "`A model`" + ` and saved as your default for new sessions</local-command-stdout>"}}`
+	n, f, home := herdrNode(t)
+	seedAgents(t, n, f, claudeAgent(sidA, proto.StatusIdle, "w1:p1", "w1:t1", "w1", "/tmp/m", ""))
+	path := writeTranscript(t, home, "/tmp/m", sidA, time.Now().Add(-time.Minute),
+		`{"type":"assistant","uuid":"a1","message":{"role":"assistant","model":"claude-sonnet-4","content":[{"type":"text","text":"hi"}]}}`)
+	empty, emptyANSI := screenFixture(t, "claude-2.1.312-empty-162.txt"), screenFixture(t, "claude-2.1.312-empty-162.ansi")
+	f.setScreens("w1:p1", empty, emptyANSI)
+	record = func(model string) {
+		t.Helper()
+		file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer file.Close()
+		lines := `{"type":"user","uuid":"u1","message":{"role":"user","content":"<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args>` + model + `</command-args>"}}` + "\n" +
+			`{"type":"user","uuid":"u2","message":{"role":"user","content":"<local-command-stdout>Set model to ` + "`A model`" + ` and saved as your default for new sessions</local-command-stdout>"}}` + "\n"
+		if _, err := file.WriteString(lines); err != nil {
+			t.Fatal(err)
+		}
 	}
-	for _, tc := range []struct {
-		name    string
-		before  []string // the transcript when the switch starts
-		written string   // what Claude Code appends once the command is typed
-		screen  string   // what the screen shows after the typing, never the confirmation
-		reads   int      // the looks at the screen
-		wantErr string
-	}{
-		{"recorded, the screen behind", []string{reply}, recordOf("opus"), "\n❯ /model opus\n", 0, ""},
-		{"an older record only", []string{reply, recordOf("opus")}, "", "\n❯ /model opus\n", modelWait, "可能没切到"},
-		{"an earlier switch's late record", []string{reply}, recordOf("sonnet"), "\n❯ /model opus\n", modelWait, "可能没切到"},
-		{"refused on the screen", []string{reply}, "", "\n❯ /model opus\n  ⎿  Unknown model: opus\n", modelRefusalLooks, "没接受"},
-		{"not redrawn, the conversation says not found", []string{reply}, "", "\n⏺ file not found\n", modelWait, "没接受"}, // waited out, not cut short
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			n, f, home := herdrNode(t)
-			seedAgents(t, n, f, claudeAgent(sidA, proto.StatusIdle, "w1:p1", "w1:t1", "w1", "/tmp/m", ""))
-			path := writeTranscript(t, home, "/tmp/m", sidA, time.Now().Add(-time.Minute), tc.before...)
-			empty, emptyANSI := screenFixture(t, "claude-2.1.312-empty-162.txt"), screenFixture(t, "claude-2.1.312-empty-162.ansi")
-			f.setScreens("w1:p1", empty, emptyANSI)
-			reads := 0
-			f.after(func(c herdrCall) {
-				if c.Method == "agent.prompt" {
-					f.setScreens("w1:p1", empty+tc.screen, emptyANSI)
-					if tc.written != "" {
-						file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
-						if err != nil {
-							t.Error(err)
-							return
-						}
-						defer file.Close()
-						if _, err := file.WriteString(tc.written + "\n"); err != nil {
-							t.Error(err)
-						}
-					}
-				}
-				if c.Method == "pane.read" && c.Params["format"] != "ansi" {
-					reads++
-				}
-			})
-			err := setModel(t, n, sidA, "opus")
-			if tc.wantErr == "" && err != nil || tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
-				t.Fatalf("err = %v, want %q", err, tc.wantErr)
+	f.after(func(c herdrCall) {
+		if c.Method == "agent.prompt" {
+			f.setScreens("w1:p1", empty+"\n❯ /model opus\n"+after, emptyANSI)
+			if after == "recorded at once" {
+				record("opus")
 			}
-			if reads != tc.reads {
-				t.Errorf("looked at the screen %d times, want %d", reads, tc.reads)
-			}
-			if got := byID(listSessions(t, n))[sidA].Model; tc.wantErr == "" && got != "opus" || tc.wantErr != "" && got != "claude-sonnet-4" {
-				t.Errorf("model shown: %q", got)
-			}
-		})
+		}
+	})
+	return n, record
+}
+
+func shownModelOf(t *testing.T, n *Node) string {
+	t.Helper()
+	return byID(listSessions(t, n))[sidA].Model
+}
+
+// Claude Code's own record of the switch confirms it while the screen does not show it (#10810).
+func TestHerdrSetModelConfirmsFromTheTranscript(t *testing.T) {
+	n, _ := modelSwitchFixture(t, "recorded at once")
+	if err := setModel(t, n, sidA, "opus"); err != nil {
+		t.Fatal(err)
 	}
+	if got := shownModelOf(t, n); got != "opus" {
+		t.Errorf("model shown: %q", got)
+	}
+}
+
+// Claude Code can take longer than the wait to run a typed command (twelve seconds were seen, #10810): the switch is
+// reported as unconfirmed, as before, and the pick shows once Claude Code recorded it; another switch's record, one
+// from before the typing, and one that comes too late do not count.
+func TestHerdrSetModelTakesALateSwitchFromTheTranscript(t *testing.T) {
+	n, record := modelSwitchFixture(t, "")
+	record("opus") // an older switch to the same model: before the typing
+	if err := setModel(t, n, sidA, "opus"); err == nil || !strings.Contains(err.Error(), "可能没切到") {
+		t.Fatalf("unconfirmed in time: %v", err)
+	}
+	if got := shownModelOf(t, n); got != "claude-sonnet-4" {
+		t.Fatalf("shown before Claude Code ran it: %q", got)
+	}
+	record("sonnet") // another switch's record
+	if got := shownModelOf(t, n); got != "claude-sonnet-4" {
+		t.Fatalf("another switch's record was taken: %q", got)
+	}
+	record("opus") // Claude Code got to the command
+	if got := shownModelOf(t, n); got != "opus" {
+		t.Fatalf("shown once recorded: %q", got)
+	}
+	n.mu.Lock()
+	awaited := n.modes[sidA].Awaited
+	n.mu.Unlock()
+	if awaited != nil {
+		t.Fatal("still awaited after it was taken")
+	}
+
+	t.Run("too late", func(t *testing.T) {
+		n, record := modelSwitchFixture(t, "")
+		if err := setModel(t, n, sidA, "opus"); err == nil {
+			t.Fatal("confirmed with nothing to go by")
+		}
+		n.mu.Lock()
+		m := n.modes[sidA]
+		late := *m.Awaited
+		late.At = time.Now().Add(-2 * awaitedModelTTL)
+		m.Awaited = &late
+		n.modes[sidA] = m
+		n.mu.Unlock()
+		record("opus")
+		if got := shownModelOf(t, n); got != "claude-sonnet-4" {
+			t.Fatalf("a record after the wait was taken: %q", got)
+		}
+	})
+	t.Run("refused", func(t *testing.T) {
+		n, _ := modelSwitchFixture(t, "  ⎿  Unknown model: opus\n")
+		if err := setModel(t, n, sidA, "opus"); err == nil || !strings.Contains(err.Error(), "没接受") {
+			t.Fatalf("refused: %v", err)
+		}
+		n.mu.Lock()
+		defer n.mu.Unlock()
+		if n.modes[sidA].Awaited != nil {
+			t.Fatal("a refused switch is awaited")
+		}
+	})
 }
 
 func TestHerdrSetModelRefusals(t *testing.T) {
