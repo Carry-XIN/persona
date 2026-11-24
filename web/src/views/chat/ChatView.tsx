@@ -1714,9 +1714,13 @@ function ActiveChatView({ mid, sid, assistant, starting: launching, onToggleSide
   const limitOn = limitLine ? lines.reduce((id, line) => (line.kind === "apiError" ? line.id : id), "") : "";
   // failed messages where they were sent: before the first message written after them (lib/outbox.ts placeFailed)
   const placed = useMemo(() => placeFailed(lines, outbox), [lines, outbox]);
+  // A card of this Agent's own over the message box (the docked ones; a side, team or subagent panel draws its cards
+  // there instead, and a folded child's card is not this terminal's dialog): a dialog_open refusal points to it (#14549).
+  // Read at render time, after `docked` below is set.
+  const ownCardAbove = () => docked.some((ix) => ix.machine_id === mid && ix.session_id === sid);
   const failedBefore = (id: string) => {
     const list = placed.before.get(id);
-    return list ? [<OutboxBubbles key={`failed:${id}`} mid={mid} sid={sid} entries={list} canRetry={!refusedNoRow} />] : [];
+    return list ? [<OutboxBubbles key={`failed:${id}`} mid={mid} sid={sid} entries={list} canRetry={!refusedNoRow} cardAbove={ownCardAbove()} />] : [];
   };
   const lastTasks = useRef<TaskIndex | undefined>(undefined);
   const tasks = useMemo(() => stableValue(lastTasks.current, buildTaskIndex(tr.items)), [tr.items]);
@@ -2658,7 +2662,7 @@ function ActiveChatView({ mid, sid, assistant, starting: launching, onToggleSide
               <div key={p.id} className="flex flex-col gap-3">
                 <UserBubble msg={p.msg} mid={mid} sid={sid} pending sendState="sending" />
               </div>
-            ) })), ...placed.rest.map((e) => ({ at: e.at, el: <OutboxBubbles key={`outbox:${e.id}`} mid={mid} sid={sid} entries={[e]} canRetry={!refusedNoRow} /> })),
+            ) })), ...placed.rest.map((e) => ({ at: e.at, el: <OutboxBubbles key={`outbox:${e.id}`} mid={mid} sid={sid} entries={[e]} canRetry={!refusedNoRow} cardAbove={ownCardAbove()} /> })),
               ...keptUndelivered.map((m) => ({ at: Date.parse(m.at) || 0, el: (
                 <PageBoundary key={`undelivered:${m.id}`} page="undelivered">
                   <Suspense fallback={<UserBubble msg={keptBubble(m)} mid={mid} sid={sid} sendState="failed" />}>

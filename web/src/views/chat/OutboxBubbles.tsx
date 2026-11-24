@@ -15,7 +15,10 @@ export function deleteFailed(mid: string, sid: string, id: string) {
   if (undo) toast(t("chat-outboxbubbles.deleted"), "ok", { label: t("chat-outboxbubbles.undo"), run: undo });
 }
 
-export function OutboxBubbles({ mid, sid, entries, canRetry = true }: { mid: string; sid: string; entries: OutboxEntry[]; canRetry?: boolean }) {
+/** `cardAbove`: the chat holds an open card of this Agent's (a question, a permission…). A message refused because a
+ *  dialog has its terminal (dialog_open) is then most likely that card's own dialog: it says to answer the card (above the message box), not to go
+ *  to the computer (#14549). */
+export function OutboxBubbles({ mid, sid, entries, canRetry = true, cardAbove = false }: { mid: string; sid: string; entries: OutboxEntry[]; canRetry?: boolean; cardAbove?: boolean }) {
   const [checking, setChecking] = useState<string>();
   const checkLock = useRef(false);
   const check = async (e: OutboxEntry) => {
@@ -41,7 +44,7 @@ export function OutboxBubbles({ mid, sid, entries, canRetry = true }: { mid: str
             // An uncertain one is no failure: its reason alone, in the caution color ("not sent: not sure it arrived"
             // contradicted itself); a definite one says it did not go, in red
             <div role={e.inDoubt ? "status" : "alert"} data-in-doubt={e.inDoubt ? (heldOnComputer(e) ? "held" : "unknown") : undefined} className="flex flex-wrap items-center justify-end gap-x-2 gap-y-1 pl-[12%] text-[11.5px]">
-              <span className={`min-w-0 ${e.inDoubt ? "text-orange" : "text-red"}`}>{e.inDoubt ? entryReason(e) : t("chat-outboxbubbles.failed", { error: entryReason(e) })}</span>
+              <span className={`min-w-0 ${e.inDoubt ? "text-orange" : "text-red"}`}>{e.inDoubt ? entryReason(e) : t("chat-outboxbubbles.failed", { error: cardAbove && e.code === "dialog_open" ? t("lib-outbox.dialog_open_card") : entryReason(e) })}</span>
               {canRetry && !e.inDoubt && e.clearable !== undefined && (
                 <button type="button" onClick={() => void retryOutbox(mid, sid, e.id, e.clearable)} className="whitespace-nowrap font-medium text-accent-ink hover:underline">
                   {t("chat-outboxbubbles.clear_and_send")}
